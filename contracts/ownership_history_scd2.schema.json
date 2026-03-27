@@ -1,0 +1,39 @@
+{
+  "title": "ownership_history_scd2",
+  "required": [
+    "ownership_sk",
+    "business_key_hash",
+    "owner_entity_id",
+    "asset_id",
+    "asset_name",
+    "asset_country",
+    "asset_sector",
+    "capacity_mw",
+    "ownership_pct",
+    "observation_source",
+    "effective_date",
+    "expiry_date",
+    "is_current_flag",
+    "version_number",
+    "change_reason",
+    "dw_batch_id"
+  ],
+  "properties": {
+    "ownership_sk": { "type": "string" },
+    "business_key_hash": { "type": "string" },
+    "owner_entity_id": { "type": "string" },
+    "asset_id": { "type": "string" },
+    "asset_name": { "type": "string" },
+    "asset_country": { "type": "string" },
+    "asset_sector": { "type": "string" },
+    "capacity_mw": { "type": "number" },
+    "ownership_pct": { "type": "number" },
+    "observation_source": { "type": "string" },
+    "effective_date": { "type": "string" },
+    "expiry_date": { "type": "string" },
+    "is_current_flag": { "type": "string" },
+    "version_number": { "type": "integer" },
+    "change_reason": { "type": "string" },
+    "dw_batch_id": { "type": "string" }
+  }
+}

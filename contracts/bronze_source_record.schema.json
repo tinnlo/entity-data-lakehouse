@@ -1,0 +1,25 @@
+{
+  "title": "bronze_source_record",
+  "required": [
+    "load_id",
+    "snapshot_date",
+    "source_name",
+    "source_record_id",
+    "source_business_key",
+    "record_type",
+    "entity_name",
+    "country_code",
+    "raw_payload"
+  ],
+  "properties": {
+    "load_id": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "source_name": { "type": "string" },
+    "source_record_id": { "type": "string" },
+    "source_business_key": { "type": "string" },
+    "record_type": { "type": "string" },
+    "entity_name": { "type": "string" },
+    "country_code": { "type": "string" },
+    "raw_payload": { "type": "string" }
+  }
+}

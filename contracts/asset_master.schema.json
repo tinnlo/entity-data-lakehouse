@@ -1,0 +1,27 @@
+{
+  "title": "asset_master",
+  "required": [
+    "asset_id",
+    "asset_name",
+    "asset_country",
+    "asset_sector",
+    "capacity_mw",
+    "operator_entity_id",
+    "source_systems",
+    "first_seen_snapshot",
+    "last_seen_snapshot",
+    "is_current"
+  ],
+  "properties": {
+    "asset_id": { "type": "string" },
+    "asset_name": { "type": "string" },
+    "asset_country": { "type": "string" },
+    "asset_sector": { "type": "string" },
+    "capacity_mw": { "type": "number" },
+    "operator_entity_id": { "type": "string" },
+    "source_systems": { "type": "string" },
+    "first_seen_snapshot": { "type": "string" },
+    "last_seen_snapshot": { "type": "string" },
+    "is_current": { "type": "boolean" }
+  }
+}

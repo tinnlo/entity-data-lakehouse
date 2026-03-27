@@ -1,0 +1,37 @@
+{
+  "title": "ownership_comprehensive_scd4",
+  "required": [
+    "ownership_observation_id",
+    "owner_entity_id",
+    "asset_id",
+    "lifecycle_key",
+    "observation_key",
+    "observation_key_hash",
+    "snapshot_date",
+    "snapshot_version",
+    "snapshot_sequence_number",
+    "is_latest_snapshot",
+    "change_status_backward",
+    "change_status_forward",
+    "row_change_status_backward",
+    "row_change_status_forward",
+    "is_dropped"
+  ],
+  "properties": {
+    "ownership_observation_id": { "type": "string" },
+    "owner_entity_id": { "type": "string" },
+    "asset_id": { "type": "string" },
+    "lifecycle_key": { "type": "string" },
+    "observation_key": { "type": "string" },
+    "observation_key_hash": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "snapshot_version": { "type": "string" },
+    "snapshot_sequence_number": { "type": "integer" },
+    "is_latest_snapshot": { "type": "boolean" },
+    "change_status_backward": { "type": "string" },
+    "change_status_forward": { "type": "string" },
+    "row_change_status_backward": { "type": "string" },
+    "row_change_status_forward": { "type": "string" },
+    "is_dropped": { "type": "boolean" }
+  }
+}

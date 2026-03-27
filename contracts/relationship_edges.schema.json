@@ -1,0 +1,31 @@
+{
+  "title": "relationship_edges",
+  "required": [
+    "relationship_id",
+    "from_node_type",
+    "from_node_id",
+    "to_node_type",
+    "to_node_id",
+    "relationship_type",
+    "ownership_pct",
+    "asset_role",
+    "source_name",
+    "snapshot_date",
+    "evidence_key",
+    "change_status"
+  ],
+  "properties": {
+    "relationship_id": { "type": "string" },
+    "from_node_type": { "type": "string" },
+    "from_node_id": { "type": "string" },
+    "to_node_type": { "type": "string" },
+    "to_node_id": { "type": "string" },
+    "relationship_type": { "type": "string" },
+    "ownership_pct": { "type": "number" },
+    "asset_role": { "type": "string" },
+    "source_name": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "evidence_key": { "type": "string" },
+    "change_status": { "type": "string" }
+  }
+}

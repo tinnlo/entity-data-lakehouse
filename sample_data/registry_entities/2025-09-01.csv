@@ -1,0 +1,7 @@
+source_record_id,source_business_key,record_type,entity_name,country_code,registry_entity_id,lei,entity_type
+REG001-20250901,registry|REG-001,entity,Solaris Grid Holdings PLC,GB,REG-001,LEI-SGH-001,holding_company
+REG002-20250901,registry|REG-002,entity,Solaris Renewables Iberia SL,ES,REG-002,LEI-SRI-002,operating_company
+REG003-20250901,registry|REG-003,entity,North Coast Utilities Incorporated,US,REG-003,LEI-NCU-003,utility
+REG004-20250901,registry|REG-004,entity,North Coast Storage LLC,US,REG-004,LEI-NCS-004,project_company
+REG005-20250901,registry|REG-005,entity,Rhine Infrastructure Partners GmbH,DE,REG-005,LEI-RIP-005,investment_firm
+REG006-20250901,registry|REG-006,entity,Civic Water Cooperative,FR,REG-006,LEI-CWC-006,cooperative

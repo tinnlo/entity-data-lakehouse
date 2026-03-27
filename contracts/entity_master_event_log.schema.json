@@ -1,0 +1,15 @@
+{
+  "title": "entity_master_event_log",
+  "required": [
+    "entity_id",
+    "snapshot_date",
+    "snapshot_sequence_number",
+    "event_type"
+  ],
+  "properties": {
+    "entity_id": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "snapshot_sequence_number": { "type": "integer" },
+    "event_type": { "type": "string" }
+  }
+}

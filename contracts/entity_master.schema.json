@@ -1,0 +1,31 @@
+{
+  "title": "entity_master",
+  "required": [
+    "entity_id",
+    "entity_name",
+    "normalized_name",
+    "country_code",
+    "entity_type",
+    "registry_entity_id",
+    "lei",
+    "source_systems",
+    "match_basis",
+    "first_seen_snapshot",
+    "last_seen_snapshot",
+    "is_current"
+  ],
+  "properties": {
+    "entity_id": { "type": "string" },
+    "entity_name": { "type": "string" },
+    "normalized_name": { "type": "string" },
+    "country_code": { "type": "string" },
+    "entity_type": { "type": "string" },
+    "registry_entity_id": { "type": "string" },
+    "lei": { "type": "string" },
+    "source_systems": { "type": "string" },
+    "match_basis": { "type": "string" },
+    "first_seen_snapshot": { "type": "string" },
+    "last_seen_snapshot": { "type": "string" },
+    "is_current": { "type": "boolean" }
+  }
+}

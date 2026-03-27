@@ -1,0 +1,27 @@
+{
+  "title": "owner_infrastructure_exposure_snapshot",
+  "required": [
+    "snapshot_date",
+    "owner_entity_id",
+    "asset_country",
+    "asset_sector",
+    "asset_count",
+    "controlled_asset_count",
+    "owned_capacity_mw",
+    "average_ownership_pct",
+    "relationship_count",
+    "change_status_vs_prior_snapshot"
+  ],
+  "properties": {
+    "snapshot_date": { "type": "string" },
+    "owner_entity_id": { "type": "string" },
+    "asset_country": { "type": "string" },
+    "asset_sector": { "type": "string" },
+    "asset_count": { "type": "integer" },
+    "controlled_asset_count": { "type": "integer" },
+    "owned_capacity_mw": { "type": "number" },
+    "average_ownership_pct": { "type": "number" },
+    "relationship_count": { "type": "integer" },
+    "change_status_vs_prior_snapshot": { "type": "string" }
+  }
+}

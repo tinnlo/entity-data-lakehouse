@@ -1,0 +1,3 @@
+source_record_id,source_business_key,record_type,entity_name,country_code,parent_name,parent_country_code,parent_registry_entity_id,parent_lei,parent_source_entity_id,child_name,child_country_code,child_registry_entity_id,child_lei,child_source_entity_id
+HIER001-20250101,hierarchy|REG-001|REG-002,entity_relationship,Solaris Grid Holdings plc,GB,Solaris Grid Holdings plc,GB,REG-001,LEI-SGH-001,SRC-SGH,Solaris Renewables Iberia SL,ES,REG-002,LEI-SRI-002,SRC-SRI
+HIER002-20250101,hierarchy|REG-003|REG-004,entity_relationship,North Coast Utilities Inc,US,North Coast Utilities Inc,US,REG-003,LEI-NCU-003,SRC-NCU,North Coast Storage LLC,US,REG-004,LEI-NCS-004,SRC-NCS

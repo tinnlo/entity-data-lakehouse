@@ -1,0 +1,41 @@
+{
+  "title": "ownership_lifecycle",
+  "required": [
+    "lifecycle_key",
+    "owner_entity_id",
+    "asset_id",
+    "observation_sources",
+    "source_count",
+    "first_appearance_version",
+    "first_appearance_sequence",
+    "last_appearance_version",
+    "last_appearance_sequence",
+    "total_appearances",
+    "total_snapshots_available",
+    "presence_rate",
+    "consecutive_appearances_current",
+    "max_consecutive_appearances",
+    "gap_periods",
+    "reliability_score",
+    "lifecycle_status"
+  ],
+  "properties": {
+    "lifecycle_key": { "type": "string" },
+    "owner_entity_id": { "type": "string" },
+    "asset_id": { "type": "string" },
+    "observation_sources": { "type": "string" },
+    "source_count": { "type": "integer" },
+    "first_appearance_version": { "type": "string" },
+    "first_appearance_sequence": { "type": "integer" },
+    "last_appearance_version": { "type": "string" },
+    "last_appearance_sequence": { "type": "integer" },
+    "total_appearances": { "type": "integer" },
+    "total_snapshots_available": { "type": "integer" },
+    "presence_rate": { "type": "number" },
+    "consecutive_appearances_current": { "type": "integer" },
+    "max_consecutive_appearances": { "type": "integer" },
+    "gap_periods": { "type": "integer" },
+    "reliability_score": { "type": "number" },
+    "lifecycle_status": { "type": "string" }
+  }
+}

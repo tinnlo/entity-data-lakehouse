@@ -1,0 +1,37 @@
+{
+  "title": "entity_observations",
+  "required": [
+    "entity_observation_id",
+    "entity_id",
+    "observation_key",
+    "observation_key_hash",
+    "entity_name",
+    "normalized_name",
+    "country_code",
+    "entity_type",
+    "observation_source",
+    "source_record_id",
+    "source_business_key",
+    "snapshot_date",
+    "source_version",
+    "entity_resolution_method",
+    "source_priority"
+  ],
+  "properties": {
+    "entity_observation_id": { "type": "string" },
+    "entity_id": { "type": "string" },
+    "observation_key": { "type": "string" },
+    "observation_key_hash": { "type": "string" },
+    "entity_name": { "type": "string" },
+    "normalized_name": { "type": "string" },
+    "country_code": { "type": "string" },
+    "entity_type": { "type": "string" },
+    "observation_source": { "type": "string" },
+    "source_record_id": { "type": "string" },
+    "source_business_key": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "source_version": { "type": "string" },
+    "entity_resolution_method": { "type": "string" },
+    "source_priority": { "type": "integer" }
+  }
+}

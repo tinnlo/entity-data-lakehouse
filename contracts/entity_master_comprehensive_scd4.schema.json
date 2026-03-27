@@ -1,0 +1,29 @@
+{
+  "title": "entity_master_comprehensive_scd4",
+  "required": [
+    "entity_observation_id",
+    "entity_id",
+    "observation_key",
+    "observation_key_hash",
+    "observation_source",
+    "snapshot_date",
+    "snapshot_version",
+    "snapshot_sequence_number",
+    "is_latest_snapshot",
+    "change_status_backward",
+    "is_dropped"
+  ],
+  "properties": {
+    "entity_observation_id": { "type": "string" },
+    "entity_id": { "type": "string" },
+    "observation_key": { "type": "string" },
+    "observation_key_hash": { "type": "string" },
+    "observation_source": { "type": "string" },
+    "snapshot_date": { "type": "string" },
+    "snapshot_version": { "type": "string" },
+    "snapshot_sequence_number": { "type": "integer" },
+    "is_latest_snapshot": { "type": "boolean" },
+    "change_status_backward": { "type": "string" },
+    "is_dropped": { "type": "boolean" }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "title": "entity_master_current",
+  "required": [
+    "entity_id",
+    "entity_name",
+    "normalized_name",
+    "country_code",
+    "entity_type",
+    "current_observation_source",
+    "current_snapshot_date",
+    "entity_resolution_method"
+  ],
+  "properties": {
+    "entity_id": { "type": "string" },
+    "entity_name": { "type": "string" },
+    "normalized_name": { "type": "string" },
+    "country_code": { "type": "string" },
+    "entity_type": { "type": "string" },
+    "current_observation_source": { "type": "string" },
+    "current_snapshot_date": { "type": "string" },
+    "entity_resolution_method": { "type": "string" }
+  }
+}
