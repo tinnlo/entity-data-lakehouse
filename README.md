@@ -2,6 +2,10 @@
 
 A compact medallion-style lakehouse demo that ingests public entity and infrastructure data, normalizes it into a shared entity model, and emits analytics-ready outputs.
 
+This public demo rebuilds a production architectural pattern in a public-safe form. It preserves system design, module boundaries, and execution flow while removing proprietary business logic and internal data.
+
+This demo shows a medallion-style entity and infrastructure pipeline, mirrors a production warehouse pattern with bronze, silver, and gold layers plus SCD2/SCD4 warehouse design, intentionally generalizes source details and removes private operating context, and exists in the portfolio to demonstrate architecture and pipeline design in a runnable public repo.
+
 ## Overview
 
 This repository is designed as a public portfolio project. It focuses on:
