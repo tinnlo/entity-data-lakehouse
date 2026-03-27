@@ -36,7 +36,7 @@ gold/ hybrid DW:
   - derived analytics mart
 ```
 
-See [docs/architecture.md](/Users/lxt/Documents/portfolio/entity-data-lakehouse/docs/architecture.md) and [docs/data_warehouse.md](/Users/lxt/Documents/portfolio/entity-data-lakehouse/docs/data_warehouse.md) for the detailed flow, warehouse design, and SCD2/SCD4 rationale.
+See [docs/architecture.md](docs/architecture.md) and [docs/data_warehouse.md](docs/data_warehouse.md) for the detailed flow, warehouse design, and SCD2/SCD4 rationale.
 
 ## Repository Map
 
