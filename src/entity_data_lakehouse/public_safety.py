@@ -28,6 +28,8 @@ def scan_public_safety(repo_root: Path) -> list[str]:
             continue
         if path.suffix in {".parquet", ".duckdb", ".pyc"}:
             continue
+        if any(part in {".ruff_cache", ".pytest_cache", "__pycache__"} for part in path.parts):
+            continue
         if any(part.endswith(".egg-info") for part in path.parts):
             continue
         if path.name == "public_safety.py":

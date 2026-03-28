@@ -51,7 +51,33 @@ See [docs/architecture.md](docs/architecture.md) and [docs/data_warehouse.md](do
 - `src/entity_data_lakehouse/` pipeline implementation
 - `bronze/`, `silver/`, `gold/` generated run artifacts; reproducible locally and ignored by default
 
-## Run
+## Quick Start with Docker
+
+Primary run path:
+
+```bash
+docker compose up --build
+```
+
+Equivalent legacy command:
+
+```bash
+docker-compose up --build
+```
+
+Expected result:
+
+- the bronze -> silver -> gold pipeline runs inside the container
+- generated artifacts are written to `bronze/`, `silver/`, and `gold/`
+- the retained gold mart is rebuilt in `gold/owner_infrastructure_exposure_snapshot.parquet`
+
+To run tests in the same container image:
+
+```bash
+docker compose run --rm lakehouse pytest tests/
+```
+
+## Local Run
 
 ```bash
 python3 -m pip install -e '.[dev]'

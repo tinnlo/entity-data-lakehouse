@@ -1,0 +1,8 @@
+services:
+  lakehouse:
+    build: .
+    volumes:
+      - ./sample_data:/app/sample_data
+      - ./bronze:/app/bronze
+      - ./silver:/app/silver
+      - ./gold:/app/gold

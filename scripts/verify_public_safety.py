@@ -9,10 +9,10 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from entity_data_lakehouse.public_safety import scan_public_safety
-
 
 def main() -> None:
+    from entity_data_lakehouse.public_safety import scan_public_safety
+
     findings = scan_public_safety(REPO_ROOT)
     if findings:
         for finding in findings:
