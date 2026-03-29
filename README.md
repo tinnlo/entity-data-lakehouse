@@ -140,6 +140,6 @@ These gold artifacts are also generated locally and can be rebuilt from `sample_
 
 ## Public-Safety Guarantees
 
-- No company identifiers or internal workflows are carried over from the reference repo.
-- Sample data is bundled, public-safe, and intentionally small.
-- No secrets, private URLs, or internal absolute paths are required to run the demo.
+- This repository is a public-safe demo distilled from a production project.
+- Sample data is bundled, security-safe, and intentionally small.
+- No secrets, private URLs, credentials, or internal absolute paths are required to run the demo.
