@@ -1,0 +1,30 @@
+country_code,country_name,latitude_centroid,longitude_centroid,altitude_avg_m,territorial_type,economic_level,gdp_tier,solar_irradiance_kwh_m2_yr,wind_speed_avg_ms,regulatory_stability_score
+AE,United Arab Emirates,24.0,54.0,149,coastal,high,5,2285,4.2,7
+AU,Australia,-27.0,133.0,330,coastal,high,5,1860,5.8,9
+BR,Brazil,-14.0,-51.0,320,mixed,upper_middle,3,1680,4.9,6
+CA,Canada,60.0,-96.0,487,inland,high,5,1270,5.4,9
+CN,China,35.0,105.0,652,mixed,upper_middle,4,1520,5.3,5
+DE,Germany,51.2,10.5,263,inland,high,5,1075,6.2,9
+DK,Denmark,56.3,9.5,31,coastal,high,5,1010,8.4,9
+EG,Egypt,26.8,30.8,321,coastal,lower_middle,2,2350,4.6,5
+ES,Spain,40.4,-3.7,660,coastal,high,5,1730,5.5,8
+FR,France,46.2,2.2,375,mixed,high,5,1340,5.0,9
+GB,United Kingdom,54.0,-2.0,162,coastal,high,5,950,7.5,9
+GR,Greece,39.1,22.9,490,coastal,high,4,1780,6.8,7
+ID,Indonesia,-0.8,113.9,367,island,lower_middle,2,1920,3.8,5
+IN,India,20.6,78.9,440,mixed,lower_middle,2,1950,4.5,5
+JP,Japan,36.2,138.3,438,island,high,5,1180,4.0,8
+KR,South Korea,36.0,128.0,282,coastal,high,5,1280,4.6,8
+MA,Morocco,31.8,-7.1,909,coastal,lower_middle,2,2080,5.7,6
+MX,Mexico,23.6,-102.6,1111,mixed,upper_middle,3,1990,5.2,6
+MZ,Mozambique,-18.7,35.5,345,coastal,low,1,2100,4.3,4
+NG,Nigeria,9.1,8.7,380,inland,lower_middle,2,1980,3.5,4
+NL,Netherlands,52.1,5.3,30,coastal,high,5,1010,7.8,9
+NO,Norway,60.5,8.5,460,coastal,high,5,870,8.9,9
+PL,Poland,52.0,20.0,173,inland,high,4,1060,5.5,7
+PT,Portugal,39.6,-8.0,372,coastal,high,4,1830,6.3,8
+SA,Saudi Arabia,24.0,45.0,665,inland,high,5,2310,4.8,6
+SE,Sweden,60.1,18.6,320,mixed,high,5,1000,7.2,9
+TZ,Tanzania,-6.4,34.9,1018,inland,low,1,2050,3.9,4
+US,United States,38.0,-97.0,760,mixed,high,5,1620,6.1,9
+ZA,South Africa,-29.0,25.0,1134,inland,upper_middle,3,2100,5.6,7

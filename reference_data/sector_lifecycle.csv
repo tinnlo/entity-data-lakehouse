@@ -1,0 +1,4 @@
+sector,typical_lifespan_years,min_lifespan_years,max_lifespan_years,construction_years,decommissioning_years,base_capacity_factor,irradiance_sensitivity,wind_sensitivity,altitude_sensitivity,economic_level_bonus_high,economic_level_bonus_upper_middle,economic_level_bonus_lower_middle,economic_level_bonus_low
+solar,28,20,35,2,1,0.18,0.00012,0.0,0.00002,0.02,0.01,0.0,-0.01
+wind,23,18,30,3,2,0.32,0.0,0.025,0.00003,0.02,0.01,0.0,-0.02
+storage,15,10,20,1,1,0.45,0.0,0.0,0.0,0.03,0.02,0.0,-0.03

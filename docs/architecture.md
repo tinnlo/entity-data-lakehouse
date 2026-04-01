@@ -11,6 +11,7 @@
 2. `bronze/` receives a standardized envelope per source record with typed matching fields and a `raw_payload` JSON blob.
 3. `silver/` resolves canonical entities, standardizes asset dimensions, and emits both observation-grain tables and convenience outputs.
 4. `gold/` publishes a hybrid warehouse-oriented model and a local DuckDB database for ad hoc analysis.
+5. `ml/` (executed as the final pipeline step) enriches assets with geographic and economic features from `reference_data/`, trains three scikit-learn models on a synthetic reference dataset, and writes lifecycle predictions to `gold/dw/asset_lifecycle_predictions.parquet`.
 
 ## Entity Resolution
 
@@ -43,6 +44,16 @@ Names are normalized with accent stripping, punctuation removal, case folding, a
 - `gold/owner_infrastructure_exposure_snapshot.parquet`
 - `gold/entity_lakehouse.duckdb`
 
+## ML Outputs
+
+- `gold/dw/asset_lifecycle_predictions.parquet` — per-asset lifecycle stage, retirement year, and capacity factor predictions with all enrichment features for explainability
+- `entity_lakehouse.duckdb` → table `ml_asset_lifecycle_predictions`
+
+## ML Enrichment Sources
+
+- `reference_data/country_attributes.csv` — 29 countries with geographic and economic attributes (latitude/longitude, altitude, territorial type, GDP tier, solar irradiance, wind speed, regulatory stability)
+- `reference_data/sector_lifecycle.csv` — sector lifecycle parameters for solar, wind, and storage (lifespan ranges, construction/decommissioning duration, base capacity factor, geographic sensitivity coefficients)
+
 ## History Awareness
 
 The demo includes three snapshots.
@@ -51,3 +62,4 @@ The demo includes three snapshots.
 - ownership uses SCD4 plus lifecycle metrics to measure presence, gaps, and reliability across releases
 - downstream ownership consumption uses SCD2 current/history tables
 - the public mart still reports `NEW`, `CHANGED`, `UNCHANGED`, and `DROPPED` by snapshot
+- ML lifecycle predictions use the ownership lifecycle signal (presence rate, reliability score, snapshot count) as features alongside geographic enrichment
