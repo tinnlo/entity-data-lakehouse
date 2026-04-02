@@ -28,7 +28,11 @@ def scan_public_safety(repo_root: Path) -> list[str]:
             continue
         if path.suffix in {".parquet", ".duckdb", ".pyc"}:
             continue
-        if any(part in {".ruff_cache", ".pytest_cache", "__pycache__"} for part in path.parts):
+        if any(
+            part
+            in {".ruff_cache", ".pytest_cache", "__pycache__", ".venv", "node_modules"}
+            for part in path.parts
+        ):
             continue
         if any(part.endswith(".egg-info") for part in path.parts):
             continue
@@ -37,7 +41,11 @@ def scan_public_safety(repo_root: Path) -> list[str]:
         text = path.read_text(errors="ignore")
         for token in BANNED_TOKENS:
             if token in text:
-                findings.append(f"{path.relative_to(repo_root)} contains banned token '{token}'")
+                findings.append(
+                    f"{path.relative_to(repo_root)} contains banned token '{token}'"
+                )
         if any(pattern.search(text) for pattern in generic_internal_path_patterns):
-            findings.append(f"{path.relative_to(repo_root)} contains an internal absolute path pattern")
+            findings.append(
+                f"{path.relative_to(repo_root)} contains an internal absolute path pattern"
+            )
     return findings

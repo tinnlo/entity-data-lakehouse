@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 # Model version tag written to every prediction row so consumers can track
 # which training configuration produced a result.
-_MODEL_VERSION = "v1.0-synthetic-300"
+_MODEL_VERSION = "v1.1-synthetic-300"
 
 # Lifecycle stage labels and their approximate age-fraction boundaries relative
 # to the asset's typical lifespan.
@@ -152,8 +152,24 @@ def _encode_territorial_type(value: str) -> int:
     return _TERRITORIAL_TYPE_ENCODING.get(value, 3)
 
 
-def _encode_sector(value: str) -> int:
-    return _SECTOR_ENCODING.get(value, 0)
+def _build_sector_encoding(sector_params: dict[str, dict]) -> dict[str, int]:
+    """Build a stable sector-to-integer mapping derived from the loaded sector params.
+
+    Sectors are sorted alphabetically and assigned codes starting at 1, making
+    the mapping deterministic and consistent between synthetic training data
+    generation and real-asset feature enrichment.
+
+    Because this function derives the encoding from sector_params rather than a
+    hard-coded dict, adding a new sector row to reference_data/sector_lifecycle.csv
+    with a training_weight value is sufficient to include it in both encoding
+    and training without touching ml.py.
+    """
+    return {sector: idx + 1 for idx, sector in enumerate(sorted(sector_params))}
+
+
+def _encode_sector(value: str, encoding: dict[str, int]) -> int:
+    """Look up the integer code for a sector.  Returns 0 for unknown sectors."""
+    return encoding.get(value, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +225,22 @@ def _enrich_asset_features(
             }
 
     rows: list[dict] = []
+    sector_encoding = _build_sector_encoding(sector_params)
     for _, asset in asset_master.iterrows():
         country_code = str(asset["asset_country"])
         sector = str(asset["asset_sector"])
 
         geo = country_attrs.get(country_code, fallback_country)
-        sp = sector_params.get(sector, sector_params.get("solar", {}))
+        if sector not in sector_params:
+            supported = sorted(sector_params)
+            raise ValueError(
+                f"Unsupported asset sector '{sector}' for asset '{asset['asset_id']}'. "
+                f"Supported sectors: {supported}. "
+                "To add a new sector, add a row to reference_data/sector_lifecycle.csv "
+                "with a training_weight value — the encoding and training weights are "
+                "derived from that file automatically."
+            )
+        sp = sector_params[sector]
         lc = lifecycle_by_asset.get(
             str(asset["asset_id"]),
             {
@@ -232,7 +258,7 @@ def _enrich_asset_features(
                 "asset_country": country_code,
                 "asset_sector": sector,
                 "capacity_mw": float(asset["capacity_mw"]),
-                "sector_encoded": _encode_sector(sector),
+                "sector_encoded": _encode_sector(sector, sector_encoding),
                 # Geographic features
                 "latitude": float(geo["latitude_centroid"]),
                 "longitude": float(geo["longitude_centroid"]),
@@ -279,16 +305,24 @@ def _generate_synthetic_training_data(
     noise — they are not arbitrary random values but reflect real-world
     relationships documented in energy transition literature.
 
-    Sector distribution mirrors typical global infrastructure portfolios:
-      solar 40% | wind 40% | storage 20%
+    Sector distribution is driven by the training_weight column in
+    sector_lifecycle.csv.  Weights are normalised to sum to 1.0, so adding a
+    new sector row with a training_weight value automatically includes it in
+    training without changes to this function.
 
-    Commissioning years span 2000-2024, producing a realistic mix of asset ages
-    and therefore lifecycle stages across the training population.
+    Commissioning years span 2000-2030 so future-commissioned assets
+    (commissioning_year > _REFERENCE_YEAR) are included and the classifier
+    learns the planning label.
     """
     rng = np.random.default_rng(seed)
 
-    sectors = list(sector_params.keys())
-    sector_weights = [0.40, 0.40, 0.20]  # solar, wind, storage
+    # Derive sectors and normalised weights from sector_params so that adding a
+    # new row to sector_lifecycle.csv is sufficient to include it in training.
+    sector_encoding = _build_sector_encoding(sector_params)
+    sectors = sorted(sector_params.keys())  # consistent with _build_sector_encoding
+    raw_weights = [float(sector_params[s].get("training_weight", 1.0)) for s in sectors]
+    total_weight = sum(raw_weights)
+    sector_weights = [w / total_weight for w in raw_weights]
 
     country_codes = list(country_attrs.keys())
     country_list = [country_attrs[cc] for cc in country_codes]
@@ -308,8 +342,11 @@ def _generate_synthetic_training_data(
         )
         capacity_mw = max(1.0, round(capacity_mw, 1))
 
-        # --- Commissioning year: realistic spread 2000-2024 ---
-        commissioning_year = int(rng.integers(2000, 2025))
+        # --- Commissioning year: 2000-2030 so future-commissioned assets
+        # (commissioning_year > _REFERENCE_YEAR) are included and the
+        # classifier learns the planning label.  rng.integers is upper-bound
+        # exclusive, so 2031 produces values up to and including 2030. ---
+        commissioning_year = int(rng.integers(2000, 2031))
 
         # --- Lifespan: sector typical + geographic/economic adjustment ---
         base_lifespan = float(sp["typical_lifespan_years"])
@@ -383,7 +420,7 @@ def _generate_synthetic_training_data(
             {
                 # Features
                 "capacity_mw": capacity_mw,
-                "sector_encoded": _encode_sector(sector),
+                "sector_encoded": _encode_sector(sector, sector_encoding),
                 "latitude": float(geo["latitude_centroid"]),
                 "longitude": float(geo["longitude_centroid"]),
                 "altitude_avg_m": float(geo["altitude_avg_m"]),

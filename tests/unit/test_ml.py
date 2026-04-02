@@ -20,6 +20,7 @@ import pytest
 from entity_data_lakehouse.ml import (
     _LIFECYCLE_STAGES,
     _MODEL_VERSION,
+    _build_sector_encoding,
     _encode_sector,
     _encode_territorial_type,
     _enrich_asset_features,
@@ -115,13 +116,27 @@ class TestReferenceDataLoading:
 
 
 class TestEncoders:
-    def test_sector_encoding_known_values(self):
-        assert _encode_sector("solar") == 1
-        assert _encode_sector("wind") == 2
-        assert _encode_sector("storage") == 3
+    def test_build_sector_encoding_assigns_stable_ordinals(self, sector_params):
+        """Encoding is alphabetically sorted and 1-indexed."""
+        encoding = _build_sector_encoding(sector_params)
+        # Current sectors: solar, storage, wind (alphabetical)
+        assert encoding["solar"] == 1
+        assert encoding["storage"] == 2
+        assert encoding["wind"] == 3
 
-    def test_sector_encoding_unknown_returns_zero(self):
-        assert _encode_sector("geothermal") == 0
+    def test_build_sector_encoding_covers_all_sectors(self, sector_params):
+        encoding = _build_sector_encoding(sector_params)
+        assert set(encoding.keys()) == set(sector_params.keys())
+
+    def test_encode_sector_known_values(self, sector_params):
+        encoding = _build_sector_encoding(sector_params)
+        assert _encode_sector("solar", encoding) == encoding["solar"]
+        assert _encode_sector("wind", encoding) == encoding["wind"]
+        assert _encode_sector("storage", encoding) == encoding["storage"]
+
+    def test_encode_sector_unknown_returns_zero(self, sector_params):
+        encoding = _build_sector_encoding(sector_params)
+        assert _encode_sector("geothermal", encoding) == 0
 
     def test_territorial_type_encoding_inland_highest(self):
         assert _encode_territorial_type("inland") > _encode_territorial_type("coastal")
@@ -152,10 +167,25 @@ class TestSyntheticTrainingData:
 
     def test_operating_is_dominant_stage(self, training_data):
         """Most synthetic assets should be in the 'operating' stage since
-        commissioning years span 2000-2024 and typical lifespans are 15-30 yrs."""
+        commissioning years span 2000-2030 and typical lifespans are 15-30 yrs."""
         stage_counts = training_data["lifecycle_stage"].value_counts()
         assert stage_counts.get("operating", 0) > 100, (
             "Expected at least 100/300 assets in 'operating' stage"
+        )
+
+    def test_all_five_lifecycle_stages_present(self, training_data):
+        """Every stage including 'planning' must appear in training data.
+
+        'planning' requires commissioning_year > _REFERENCE_YEAR, which is
+        only reachable when the upper bound of rng.integers exceeds 2025.
+        This test would have caught the original off-by-one (2025 exclusive
+        → max year 2024 → planning branch dead).
+        """
+        generated = set(training_data["lifecycle_stage"].unique())
+        missing = set(_LIFECYCLE_STAGES) - generated
+        assert not missing, (
+            f"Lifecycle stages not represented in training data: {missing}. "
+            "The classifier cannot predict stages it has never seen."
         )
 
     def test_capacity_factors_in_physical_range(self, training_data):
@@ -196,14 +226,18 @@ class TestSyntheticTrainingData:
     def test_sector_distribution_approximately_correct(
         self, country_attrs, sector_params
     ):
-        """Solar and wind should each be ~40%, storage ~20% (±10% tolerance)."""
+        """Sampling fractions should match training_weight values in sector_lifecycle.csv.
+
+        Alphabetical encoding: solar=1 (40%), storage=2 (20%), wind=3 (40%).
+        """
         df = _generate_synthetic_training_data(
             country_attrs, sector_params, n_samples=1000, seed=99
         )
+        encoding = _build_sector_encoding(sector_params)
         counts = df["sector_encoded"].value_counts(normalize=True)
-        solar_pct = counts.get(1, 0.0)
-        wind_pct = counts.get(2, 0.0)
-        storage_pct = counts.get(3, 0.0)
+        solar_pct = counts.get(encoding["solar"], 0.0)
+        storage_pct = counts.get(encoding["storage"], 0.0)
+        wind_pct = counts.get(encoding["wind"], 0.0)
         assert 0.30 <= solar_pct <= 0.50, (
             f"Solar fraction {solar_pct:.2%} outside 30-50%"
         )
@@ -343,6 +377,30 @@ class TestFeatureEnrichment:
         )
         for col in _FEATURE_COLS:
             assert col in enriched.columns, f"Missing feature column: {col}"
+
+    def test_unsupported_sector_raises_value_error(self, country_attrs, sector_params):
+        """An asset with a sector not in sector_lifecycle.csv must raise ValueError
+        rather than silently falling back to solar behaviour."""
+        unsupported_asset = pd.DataFrame(
+            [
+                {
+                    "asset_id": "ast-bad",
+                    "asset_name": "Hydro Dam Alpha",
+                    "asset_country": "GB",
+                    "asset_sector": "hydro",  # not in reference data
+                    "capacity_mw": 200.0,
+                    "operator_entity_id": "ent-001",
+                    "source_systems": "infrastructure_assets",
+                    "first_seen_snapshot": "2025-01-01",
+                    "last_seen_snapshot": "2025-01-01",
+                    "is_current": True,
+                }
+            ]
+        )
+        with pytest.raises(ValueError, match="Unsupported asset sector 'hydro'"):
+            _enrich_asset_features(
+                unsupported_asset, pd.DataFrame(), country_attrs, sector_params
+            )
 
 
 # ---------------------------------------------------------------------------
