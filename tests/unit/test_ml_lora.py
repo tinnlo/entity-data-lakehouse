@@ -187,9 +187,7 @@ def _pipeline_inputs(_reference_root):
     )
     # asset_master columns required by _enrich_asset_features
     asset_master = (
-        synth[["asset_id"] if "asset_id" in synth.columns else []].copy()
-        if False
-        else synth.rename(columns={"lifecycle_stage": "_drop"})
+        synth.rename(columns={"lifecycle_stage": "_drop"})
         .drop(columns=["_drop"], errors="ignore")
         .assign(
             asset_id=[f"TEST_{i}" for i in range(5)],
@@ -251,8 +249,8 @@ def test_build_ml_predictions_sklearn_by_default(
         )
 
     assert "ml_lora" not in str(result)
-    # ml_lora should NOT have been imported as a side-effect.
-    assert "entity_data_lakehouse.ml_lora" not in sys.modules or True  # best-effort
+    # ml_lora must NOT have been imported as a side-effect of the sklearn path.
+    assert "entity_data_lakehouse.ml_lora" not in sys.modules
 
 
 def test_build_ml_predictions_lora_override(

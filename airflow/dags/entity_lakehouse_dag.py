@@ -7,6 +7,8 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
+# Container-absolute path — assumes the repo is bind-mounted at /opt/airflow/repo
+# as defined in the `volumes:` section of docker-compose.yml (airflow service).
 REPO_ROOT = Path("/opt/airflow/repo")
 
 
@@ -30,11 +32,13 @@ with DAG(
 
     run_dbt = BashOperator(
         task_id="run_dbt",
+        # Paths below are container-absolute; see REPO_ROOT comment above.
         bash_command="cd /opt/airflow/repo/dbt && dbt run --profiles-dir . && dbt test --profiles-dir .",
     )
 
     run_public_safety_scan = BashOperator(
         task_id="run_public_safety_scan",
+        # Path is container-absolute; see REPO_ROOT comment above.
         bash_command="python /opt/airflow/repo/scripts/verify_public_safety.py",
     )
 

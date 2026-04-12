@@ -111,9 +111,54 @@ used in real transition-risk and stranded-asset models.
 
 `scripts/verify_public_safety.py` — scans for banned company references, internal paths, and credentials before any commit or publish step.
 
+### dbt Modelling Layer
+
+A dbt-duckdb project (`dbt/`) sits above the gold DuckDB and re-models the warehouse tables into a separate analytics schema (`main_analytics`). This leaves the upstream `main.dw_*`, `main.mart_*`, and `main.ml_*` tables produced by the Python pipeline completely untouched.
+
+| dbt model | Source table | Target |
+|---|---|---|
+| `entity_master_current` | `dw_entity_master_current` | `main_analytics.entity_master_current` |
+| `ownership_current` | `dw_ownership_current` | `main_analytics.ownership_current` |
+| `owner_infrastructure_exposure_snapshot` | `mart_owner_infrastructure_exposure_snapshot` | `main_analytics.owner_infrastructure_exposure_snapshot` |
+| `asset_lifecycle_predictions` | `ml_asset_lifecycle_predictions` | `main_analytics.asset_lifecycle_predictions` |
+
+20 dbt tests pass (schema uniqueness/non-null + 3 singular SQL data-quality tests). See `docs/data_warehouse.md` for the full schema layout and test descriptions.
+
+### Apache Airflow Orchestration
+
+An Airflow 2.9 DAG (`airflow/dags/entity_lakehouse_dag.py`) wraps the full pipeline for orchestration demo purposes:
+
+```
+run_pipeline_stages  >>  run_dbt  >>  run_public_safety_scan
+```
+
+- `run_pipeline_stages` — PythonOperator: bronze → silver → gold → ML
+- `run_dbt` — BashOperator: `dbt run` + `dbt test` against the gold DuckDB
+- `run_public_safety_scan` — BashOperator: public-safety scan as a final gate
+
+Uses `SequentialExecutor` + SQLite (recommended for single-machine demo). The DAG is trigger-only (`schedule=None`). See `airflow/README.md` and `docs/architecture.md` for details.
+
+### LoRA Fine-Tuning Demo
+
+An optional LoRA-tuned LLM path (`src/entity_data_lakehouse/ml_lora.py`) overrides the `predicted_lifecycle_stage` column when `ML_BACKEND=lora` is set. All other prediction columns (retirement year, capacity factor, etc.) continue using scikit-learn unchanged, so integration-test row counts are not affected.
+
+All heavy dependencies (`peft`, `transformers`, `trl`, `torch`) are imported lazily inside function bodies, so the module can be imported in CI without those packages installed.
+
+| Component | Description |
+|---|---|
+| `ml_lora.py` | Lazy-import module: prompt construction, JSONL generation, adapter training, inference |
+| `scripts/train_lora.py` | CLI to generate synthetic JSONL and fine-tune the adapter |
+| `scripts/eval_lora.py` | Accuracy / F1 / confusion matrix: LoRA vs sklearn baseline |
+| `models/lifecycle_lora_adapter/` | Saved PEFT adapter weights (gitignored) |
+
+Base model: `Qwen/Qwen2.5-0.5B-Instruct`. Hardware: MPS (Apple Silicon) or CUDA recommended.
+
 ### Docker Support
 
-Full Docker and Docker Compose setup. The full bronze → silver → gold pipeline runs in the container; generated artifacts are written back to the host via volume mounts.
+Full Docker and Docker Compose setup:
+
+- **lakehouse service** — runs the full bronze → silver → gold → ML pipeline; generated artifacts are written back to the host via volume mounts.
+- **airflow service** — runs `airflow standalone` (scheduler + webserver + triggerer) with the custom Airflow 2.9 image; UI available at `http://localhost:8080` (admin/admin).
 
 ---
 

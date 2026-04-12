@@ -287,8 +287,11 @@ def predict_lifecycle_lora(features: dict, adapter_dir: Path) -> tuple[str, floa
         stage = "operating"
         confidence = 0.5
     else:
-        # Use a uniform-over-valid-stages proxy confidence when the model is
-        # not computing explicit per-class logits.
-        confidence = round(1.0 / len(LIFECYCLE_STAGES) + 0.4, 4)  # ~0.6 as a proxy
+        # DEMO PLACEHOLDER: this is NOT a real softmax probability.
+        # A real inference pass would produce per-class logits; we would then
+        # call softmax and take the max.  Here we use a fixed formula
+        # (uniform baseline + 0.4 offset ≈ 0.6) purely to populate the column
+        # with a plausible-looking float for portfolio demonstration purposes.
+        confidence = round(1.0 / len(LIFECYCLE_STAGES) + 0.4, 4)
 
     return stage, confidence
