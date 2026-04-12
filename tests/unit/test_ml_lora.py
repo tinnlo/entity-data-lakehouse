@@ -222,21 +222,20 @@ def _pipeline_inputs(_reference_root):
 def test_build_ml_predictions_sklearn_by_default(
     monkeypatch, tmp_path: Path, _pipeline_inputs
 ) -> None:
-    """When ML_BACKEND is unset, ml_lora must never be imported."""
+    """When ML_BACKEND is unset, build_ml_predictions must not import ml_lora."""
     monkeypatch.delenv("ML_BACKEND", raising=False)
 
-    # Track whether ml_lora is imported via a sentinel in sys.modules.
-    import sys
-
-    sys.modules.pop("entity_data_lakehouse.ml_lora", None)
-
     from entity_data_lakehouse.ml import build_ml_predictions
-    from pathlib import Path
-    import contracts as _c  # noqa: F401 — side-effect import guard
 
     gold_root = tmp_path / "gold"
     gold_root.mkdir()
     (gold_root / "dw").mkdir()
+
+    import sys
+
+    # Pop ml_lora immediately before the call so we capture only what
+    # build_ml_predictions itself imports (not artefacts of other tests).
+    sys.modules.pop("entity_data_lakehouse.ml_lora", None)
 
     # Patch validate_dataframe to be a no-op so we don't need a real DuckDB.
     with patch("entity_data_lakehouse.ml.validate_dataframe"):
