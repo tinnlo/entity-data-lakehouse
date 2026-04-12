@@ -3,9 +3,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
-bronze/
-silver/
-gold/
+/bronze/
+/silver/
+/gold/
 .opencode/
 dbt/target/
 dbt/dbt_packages/

@@ -6,3 +6,23 @@ services:
       - ./bronze:/app/bronze
       - ./silver:/app/silver
       - ./gold:/app/gold
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/repo/airflow/dags
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      PYTHONPATH: /opt/airflow/repo/src
+    volumes:
+      - ./:/opt/airflow/repo
+    ports:
+      - "8080:8080"
+    command: standalone

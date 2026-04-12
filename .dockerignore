@@ -10,3 +10,7 @@ __pycache__
 bronze
 silver
 gold
+.opencode
+dbt/target
+dbt/logs
+dbt/dbt_packages

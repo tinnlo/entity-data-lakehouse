@@ -161,6 +161,22 @@ cd dbt && dbt run --profiles-dir . && dbt test --profiles-dir .
 
 Models land in `main_analytics.*` inside `gold/entity_lakehouse.duckdb`. See [docs/data_warehouse.md](docs/data_warehouse.md) for details.
 
+## Apache Airflow DAG
+
+An Airflow DAG wraps the full pipeline for orchestration demo purposes, runnable via Docker:
+
+```bash
+docker compose build airflow
+docker compose up airflow       # UI at http://localhost:8080 — admin/admin
+make airflow-up                 # equivalent shorthand
+```
+
+The DAG `entity_lakehouse_pipeline` runs three tasks in sequence:
+`run_pipeline_stages` → `run_dbt` → `run_public_safety_scan`.
+
+Uses `SequentialExecutor` + SQLite (Airflow 2.9 recommended dev configuration).
+See [airflow/README.md](airflow/README.md) and [docs/architecture.md](docs/architecture.md) for details.
+
 ## Public-Safety Guarantees
 
 - This repository is a public-safe demo distilled from a production project.

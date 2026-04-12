@@ -63,3 +63,35 @@ The demo includes three snapshots.
 - downstream ownership consumption uses SCD2 current/history tables
 - the public mart still reports `NEW`, `CHANGED`, `UNCHANGED`, and `DROPPED` by snapshot
 - ML lifecycle predictions use the ownership lifecycle signal (presence rate, reliability score, snapshot count) as features alongside geographic enrichment
+
+## Airflow DAG
+
+An Apache Airflow DAG (`airflow/dags/entity_lakehouse_dag.py`) wraps the full pipeline
+for orchestration demo purposes.
+
+### DAG: `entity_lakehouse_pipeline`
+
+```
+run_pipeline_stages  >>  run_dbt  >>  run_public_safety_scan
+```
+
+| Task | Type | Action |
+|---|---|---|
+| `run_pipeline_stages` | PythonOperator | Calls `run_pipeline(repo_root)` — bronze → silver → gold → ML |
+| `run_dbt` | BashOperator | `dbt run --profiles-dir . && dbt test --profiles-dir .` |
+| `run_public_safety_scan` | BashOperator | `python verify_public_safety.py` |
+
+The DAG uses `schedule=None` (manual trigger) and runs with `SequentialExecutor` +
+SQLite, which is the recommended configuration for single-machine demo deployments of
+Airflow 2.9.
+
+### Running
+
+```bash
+docker compose build airflow
+docker compose up airflow     # UI at http://localhost:8080 (admin/admin)
+# or:
+make airflow-up
+```
+
+See `airflow/README.md` for detailed local dev instructions.
