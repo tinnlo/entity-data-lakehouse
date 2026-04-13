@@ -148,6 +148,51 @@ def test_build_search_text_handles_none_fields() -> None:
     assert text == "Acme"  # only non-empty field
 
 
+def test_compute_corpus_fingerprint_deterministic() -> None:
+    """Same inputs always produce the same fingerprint."""
+    from entity_data_lakehouse.search import _compute_corpus_fingerprint
+
+    ids = ["E1", "E2"]
+    texts = ["Acme Solar DE OPERATOR", "Nordic Wind NO OPERATOR"]
+    fp1 = _compute_corpus_fingerprint(ids, texts, "all-MiniLM-L6-v2")
+    fp2 = _compute_corpus_fingerprint(ids, texts, "all-MiniLM-L6-v2")
+    assert fp1 == fp2
+    assert len(fp1) == 64  # SHA-256 hex digest
+
+
+def test_compute_corpus_fingerprint_text_change_detected() -> None:
+    """Changing a search text field produces a different fingerprint."""
+    from entity_data_lakehouse.search import _compute_corpus_fingerprint
+
+    ids = ["E1"]
+    fp_before = _compute_corpus_fingerprint(ids, ["Acme Solar DE"], "all-MiniLM-L6-v2")
+    fp_after = _compute_corpus_fingerprint(ids, ["Acme Wind DE"], "all-MiniLM-L6-v2")
+    assert fp_before != fp_after
+
+
+def test_compute_corpus_fingerprint_model_change_detected() -> None:
+    """Changing the model name produces a different fingerprint."""
+    from entity_data_lakehouse.search import _compute_corpus_fingerprint
+
+    ids = ["E1"]
+    texts = ["Acme Solar DE"]
+    fp_a = _compute_corpus_fingerprint(ids, texts, "all-MiniLM-L6-v2")
+    fp_b = _compute_corpus_fingerprint(ids, texts, "all-mpnet-base-v2")
+    assert fp_a != fp_b
+
+
+def test_compute_corpus_fingerprint_order_independent() -> None:
+    """Fingerprint is stable regardless of the input list order."""
+    from entity_data_lakehouse.search import _compute_corpus_fingerprint
+
+    ids_ab = ["E1", "E2"]
+    texts_ab = ["text one", "text two"]
+    ids_ba = ["E2", "E1"]
+    texts_ba = ["text two", "text one"]
+    assert _compute_corpus_fingerprint(ids_ab, texts_ab, "m") == \
+        _compute_corpus_fingerprint(ids_ba, texts_ba, "m")
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — require [search] extras.
 # ---------------------------------------------------------------------------
@@ -201,6 +246,37 @@ class TestBuildSearchIndex:
     def test_qdrant_collection_populated(self, search_index) -> None:  # type: ignore[no-untyped-def]
         info = search_index._qdrant.get_collection("entity_master")
         assert info.points_count == len(search_index._entity_rows)
+
+    @_requires_search
+    def test_fingerprint_written_on_disk_build(
+        self,
+        gold_duckdb: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Fingerprint file is written after an on-disk build."""
+        from entity_data_lakehouse.search import _FINGERPRINT_FILE, build_search_index
+
+        qdrant_path = tmp_path / "qdrant_store"
+        build_search_index(gold_duckdb, qdrant_path=qdrant_path)
+        fp_file = qdrant_path / _FINGERPRINT_FILE
+        assert fp_file.exists()
+        assert len(fp_file.read_text().strip()) == 64  # SHA-256 hex
+
+    @_requires_search
+    def test_fingerprint_reuse_skips_rebuild(
+        self,
+        gold_duckdb: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Second call with unchanged corpus reuses collection (no re-embed)."""
+        from entity_data_lakehouse.search import _FINGERPRINT_FILE, build_search_index
+
+        qdrant_path = tmp_path / "qdrant_store"
+        build_search_index(gold_duckdb, qdrant_path=qdrant_path)
+        fp_after_first = (qdrant_path / _FINGERPRINT_FILE).read_text()
+        build_search_index(gold_duckdb, qdrant_path=qdrant_path)
+        fp_after_second = (qdrant_path / _FINGERPRINT_FILE).read_text()
+        assert fp_after_first == fp_after_second
 
 
 class TestHybridSearch:

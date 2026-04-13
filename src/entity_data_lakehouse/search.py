@@ -27,6 +27,8 @@ EntitySearchIndex.search(query, top_k) -> list[SearchResult]
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,6 +78,7 @@ _EMBED_DIM = 384  # all-MiniLM-L6-v2 output dimension
 _RRF_K = 60  # standard RRF constant from Cormack et al. 2009
 _BM25_K1 = 1.5  # term-frequency saturation; 1.2–2.0 is typical
 _BM25_B = 0.75  # document-length normalisation; 0.75 is the BM25 default
+_FINGERPRINT_FILE = ".fingerprint"  # written inside qdrant_path after a build
 
 
 # ---------------------------------------------------------------------------
@@ -227,28 +230,42 @@ def _build_search_text(row: dict) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
-def _qdrant_collection_matches(
+def _compute_corpus_fingerprint(
+    entity_ids: list[str],
+    texts: list[str],
+    model_name: str,
+) -> str:
+    """Return a SHA-256 hex digest of the current corpus + model name.
+
+    Captures both entity identity *and* the full search text used for
+    embedding, so any change to entity_name, normalized_name, country_code,
+    entity_type, or lei will produce a different fingerprint and trigger a
+    rebuild of the vector collection.
+    """
+    corpus_map = dict(sorted(zip(entity_ids, texts)))
+    payload = json.dumps({"corpus": corpus_map, "model": model_name}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _qdrant_collection_valid(
     qdrant: "QdrantClient",
     collection_name: str,
-    expected_ids: list[str],
+    qdrant_path: Path,
+    fingerprint: str,
 ) -> bool:
-    """Return True iff the persisted collection contains exactly expected_ids.
+    """Return True iff the persisted collection exists and its fingerprint matches.
 
-    Scrolls payloads only (no vectors) and compares the stored entity_id set
-    against the current DuckDB rows.  A mismatch means the pipeline has been
-    re-run with different data and the collection must be rebuilt.
+    Reads the fingerprint written by the last successful build from
+    ``qdrant_path / _FINGERPRINT_FILE`` and compares it to the fingerprint
+    computed from the current DuckDB rows and model name.  A mismatch means
+    the corpus or model has changed and the collection must be rebuilt.
     """
     if not qdrant.collection_exists(collection_name):
         return False
-    # Scroll all stored payloads (no vectors needed — cheaper).
-    results, _ = qdrant.scroll(
-        collection_name=collection_name,
-        with_payload=True,
-        with_vectors=False,
-        limit=len(expected_ids) + 1,  # +1 to detect extra points
-    )
-    stored_ids = {point.payload["entity_id"] for point in results}
-    return stored_ids == set(expected_ids)
+    fp_path = qdrant_path / _FINGERPRINT_FILE
+    if not fp_path.exists():
+        return False
+    return fp_path.read_text().strip() == fingerprint
 
 
 def build_search_index(
@@ -264,11 +281,12 @@ def build_search_index(
     qdrant_path:
         Path for persistent Qdrant local storage.  Defaults to
         ``<duckdb_path.parent>/qdrant_store/`` so the collection survives
-        restarts without re-embedding.  The stored entity IDs are validated
-        against the current DuckDB rows on every call; a mismatch (e.g. after
-        the pipeline is re-run with new data) triggers a full rebuild.
-        Pass ``Path(":memory:")`` to force an in-memory (non-persistent)
-        collection — useful in tests.
+        restarts without re-embedding.  On each call a SHA-256 fingerprint
+        of ``{entity_id: search_text}`` and the model name is compared
+        against the stored fingerprint; any change to entity text fields or
+        the model triggers a full rebuild, keeping BM25 and vector legs in
+        sync.  Pass ``Path(":memory:")`` to force an in-memory
+        (non-persistent) collection — useful in tests.
     """
     _EXTRAS_MSG = (
         "Install with: pip install 'entity-data-lakehouse[search]'"
@@ -322,14 +340,20 @@ def build_search_index(
     if qdrant_path is None:
         qdrant_path = duckdb_path.parent / "qdrant_store"
 
+    # Corpus fingerprint covers entity text fields + model name.  Written to
+    # disk after a successful build; checked on every subsequent call so that
+    # any change to entity_name, normalized_name, country_code, entity_type,
+    # or lei triggers a full rebuild rather than silently reusing stale vectors.
+    fingerprint = _compute_corpus_fingerprint(entity_ids, texts, _EMBED_MODEL)
+
     if str(qdrant_path) == ":memory:":
         qdrant = QdrantClient(":memory:")
         _collection_ready = False
     else:
         qdrant_path.mkdir(parents=True, exist_ok=True)
         qdrant = QdrantClient(path=str(qdrant_path))
-        _collection_ready = _qdrant_collection_matches(
-            qdrant, _COLLECTION_NAME, entity_ids
+        _collection_ready = _qdrant_collection_valid(
+            qdrant, _COLLECTION_NAME, qdrant_path, fingerprint
         )
 
     if not _collection_ready:
@@ -352,6 +376,9 @@ def build_search_index(
             for idx in range(len(entity_rows))
         ]
         qdrant.upsert(collection_name=_COLLECTION_NAME, points=points)
+        # Write fingerprint only after a successful build.
+        if str(qdrant_path) != ":memory:":
+            (qdrant_path / _FINGERPRINT_FILE).write_text(fingerprint)
 
     return EntitySearchIndex(
         duckdb_path=duckdb_path,
