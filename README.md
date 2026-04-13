@@ -177,6 +177,68 @@ The DAG `entity_lakehouse_pipeline` runs three tasks in sequence:
 Uses `SequentialExecutor` + SQLite (Airflow 2.9 recommended dev configuration).
 See [airflow/README.md](airflow/README.md) and [docs/architecture.md](docs/architecture.md) for details.
 
+## Hybrid Search Demo
+
+An optional hybrid search layer queries the entity master using **BM25 + dense vector retrieval + Reciprocal Rank Fusion (RRF)**.
+
+**Architecture:**
+
+| Layer | Implementation | Role |
+|---|---|---|
+| BM25 leg | `bm25s` (pure-Python, tunable k1/b, numpy backend) | Exact keyword matching, proper-noun precision |
+| Dense leg | `sentence-transformers/all-MiniLM-L6-v2` + Qdrant (local mode) | Semantic similarity |
+| Fusion | Reciprocal Rank Fusion (k=60, Cormack et al. 2009) | Rank-based merge — no score normalisation needed |
+| Storage | Qdrant on-disk (`gold/qdrant_store/`) | Survives restarts without re-embedding |
+
+**Install search extras:**
+
+```bash
+pip install -e '.[search]'
+```
+
+**Run the pipeline first** (builds `gold/entity_lakehouse.duckdb`):
+
+```bash
+python scripts/run_demo.py
+```
+
+**CLI search:**
+
+```bash
+python scripts/search_demo.py "solar energy Germany"
+python scripts/search_demo.py "infrastructure holding" --top-k 3
+```
+
+**FastAPI server:**
+
+```bash
+uvicorn entity_data_lakehouse.api:app --reload --port 8000
+curl "http://localhost:8000/search?q=solar+Germany&top_k=3"
+curl "http://localhost:8000/health"
+```
+
+The `ENTITY_DUCKDB_PATH` environment variable overrides the default DuckDB path.
+
+**What the output shows:**
+
+```
+Rank  RRF Score    BM25↑   Vec↑    Entity                              Country  Type
+----  -----------  ------  ------  ----------------------------------  -------  --------
+1     0.030769     1       2       Acme Solar Holdings GmbH            DE       OPERATOR
+2     0.028571     2       1       Nordic Wind Energy AS               NO       OPERATOR
+...
+```
+
+- `BM25↑` / `Vec↑` — rank in each individual list (lower = more relevant).  `—` means the entity was not in that list's top candidates.
+- `RRF Score` — fused rank score; higher is better.
+
+**Design notes:**
+
+- `bm25s` builds the BM25 inverted index entirely in memory (no DuckDB writes) with tunable `k1=1.5` (term-frequency saturation) and `b=0.75` (document-length normalisation) parameters.  This replaces the DuckDB FTS extension, which offered no tunable k1/b parameters and rebuilt the index on every call.
+- Qdrant runs in local on-disk mode (`gold/qdrant_store/`); the collection is only built and embedded once.  Pass `qdrant_path=Path(":memory:")` in tests or demos where persistence is unwanted.
+- The RRF constant k=60 is the standard value from the original paper; it prevents top-ranked items in a single list from dominating when the other list has no match.
+- Linear score combination (e.g. `0.7 * vector + 0.3 * bm25`) is intentionally avoided: raw BM25 and cosine scores are not comparable and are not linearly separable in score space.
+
 ## LoRA Fine-Tuning Demo
 
 An optional LoRA-tuned LLM path overrides the `predicted_lifecycle_stage` column when

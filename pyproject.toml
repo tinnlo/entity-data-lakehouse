@@ -33,6 +33,13 @@ lora = [
   "datasets>=2.18.0",
   "accelerate>=0.30.0",
 ]
+search = [
+  "bm25s>=0.2.0",
+  "sentence-transformers>=3.0.0",
+  "qdrant-client>=1.9.0",
+  "fastapi>=0.111.0",
+  "uvicorn>=0.29.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
