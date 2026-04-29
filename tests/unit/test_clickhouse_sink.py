@@ -549,6 +549,31 @@ def test_validate_dtypes_passes_on_correct_types() -> None:
     _validate_dtypes("ml_asset_lifecycle_predictions", df, ddl_cols)  # must not raise
 
 
+def test_validate_dtypes_accepts_pandas_string_extension_dtype() -> None:
+    df = _ownership_current_df().copy()
+    df["batch_id"] = "run-1"
+    for col in [
+        "ownership_sk",
+        "business_key_hash",
+        "owner_entity_id",
+        "owner_entity_name",
+        "asset_id",
+        "asset_name",
+        "asset_country",
+        "asset_sector",
+        "observation_source",
+        "effective_date",
+        "expiry_date",
+        "is_current_flag",
+        "change_reason",
+        "dw_batch_id",
+        "batch_id",
+    ]:
+        df[col] = df[col].astype("string")
+    ddl_cols = _parse_ddl_columns("ownership_current")
+    _validate_dtypes("ownership_current", df, ddl_cols)  # must not raise
+
+
 def test_validate_dtypes_rejects_string_in_int_column() -> None:
     df = _exposure_snapshot_df().copy()
     df["asset_count"] = df["asset_count"].astype(str)  # object dtype, should be Int64

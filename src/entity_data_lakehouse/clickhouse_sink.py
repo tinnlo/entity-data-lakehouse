@@ -198,11 +198,36 @@ _TABLE_SOURCES: dict[str, tuple[str, str]] = {
 # Used by _validate_dtypes() for early, clear failure on type mismatches.
 # ---------------------------------------------------------------------------
 _CH_TYPE_FAMILIES: dict[str, tuple[str, ...]] = {
-    "String": ("object", "string"),
+    "String": ("object", "string", "str"),
     "Float64": ("float64", "float32", "Float64", "Float32"),
     "Int64": ("int64", "int32", "int16", "int8", "Int64", "Int32", "Int16", "Int8"),
     "UInt8": ("uint8", "UInt8", "bool"),
 }
+
+
+def _dtype_matches_clickhouse(ch_type: str, series: "pd.Series") -> bool:
+    """Return True when a pandas Series is compatible with a ClickHouse type.
+
+    Raw dtype-string comparisons are brittle across pandas versions. In CI,
+    string columns may surface as ``str`` while local runs often report
+    ``object`` or ``string``. Use pandas' semantic dtype predicates instead.
+    """
+    from pandas.api.types import (
+        is_bool_dtype,
+        is_float_dtype,
+        is_integer_dtype,
+        is_string_dtype,
+    )
+
+    if ch_type == "String":
+        return bool(is_string_dtype(series))
+    if ch_type == "Float64":
+        return bool(is_float_dtype(series))
+    if ch_type == "Int64":
+        return bool(is_integer_dtype(series) and not is_bool_dtype(series))
+    if ch_type == "UInt8":
+        return bool(is_bool_dtype(series) or str(series.dtype).lower().startswith("uint"))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +717,7 @@ def _validate_dtypes(
             # Unknown type — skip rather than block.
             continue
         actual_dtype = str(df[col].dtype)
-        if actual_dtype not in allowed:
+        if not _dtype_matches_clickhouse(ch_type, df[col]):
             errors.append(
                 f"  column '{col}': declared {ch_type}, "
                 f"pandas dtype is '{actual_dtype}' (allowed: {allowed})"
