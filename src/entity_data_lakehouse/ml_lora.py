@@ -19,9 +19,9 @@ import json
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from entity_data_lakehouse.observability import get_langfuse
+from entity_data_lakehouse.observability import get_langfuse  # noqa: F401 — re-exported for monkeypatching in tests
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -286,11 +286,29 @@ def train_lora_adapter(
     trainer.model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
 
+    from entity_data_lakehouse.benchmark_costs import load_pricing
+
+    pricing = load_pricing()
     meta_path = output_dir / "adapter_metadata.json"
-    meta_path.write_text(_json.dumps({
-        "base_model": base_model,
-        "revision": revision,
-    }))
+    existing_meta = {}
+    if meta_path.exists():
+        try:
+            existing_meta = _json.loads(meta_path.read_text())
+        except (_json.JSONDecodeError, OSError):
+            pass
+    # Always overwrite provenance fields so retraining into an existing
+    # output directory never leaves stale base_model / revision metadata.
+    existing_meta["base_model"] = base_model
+    existing_meta["revision"] = revision
+    existing_meta["training_benchmark"] = {
+        "training_runtime_s": None,
+        "dataset_rows": len(dataset),
+        "epochs": epochs,
+        "pricing_profile": pricing["pricing_profile"],
+        "lora_train_usd_per_hour": pricing["lora_train_usd_per_hour"],
+        "notes": pricing["notes"],
+    }
+    meta_path.write_text(_json.dumps(existing_meta, indent=2))
     logger.info("LoRA adapter saved to %s (metadata: %s)", output_dir, meta_path)
 
 
@@ -550,6 +568,14 @@ def predict_lifecycle_lora_batch(
     if n_rows == 0:
         return []
 
+    # Load pricing once for the whole batch so _emit_lora_chunk does not
+    # re-read env vars on every chunk call.
+    try:
+        from entity_data_lakehouse.benchmark_costs import load_pricing as _load_pricing_batch
+        _batch_pricing: dict | None = _load_pricing_batch()
+    except Exception:
+        _batch_pricing = None
+
     try:
         import os as _os
         import torch
@@ -582,6 +608,12 @@ def predict_lifecycle_lora_batch(
         chunk_dicts = chunk_df.to_dict("records")
 
         try:
+            import time as _time
+            # Start timer before prompt construction, tokenization, and tensor
+            # assembly so chunk telemetry covers end-to-end batch inference
+            # cost, matching the boundary used by eval/report timing.
+            _chunk_t0 = _time.perf_counter()
+
             # Build all (asset × label) sequences for this chunk.
             all_prompt_lens: list[int] = []
             all_full_ids: list[list[int]] = []
@@ -655,6 +687,8 @@ def predict_lifecycle_lora_batch(
                 chunk_stages.append(stage)
                 chunk_success += 1
 
+            _chunk_runtime_s = _time.perf_counter() - _chunk_t0
+
             # Emit a single chunk-level telemetry event instead of one per row.
             _emit_lora_chunk(
                 chunk_size=len(chunk_dicts),
@@ -662,6 +696,8 @@ def predict_lifecycle_lora_batch(
                 chunk_stages=chunk_stages,
                 base_model_name=base_model_name,
                 parent_trace=parent_trace,
+                chunk_runtime_s=_chunk_runtime_s,
+                pricing=_batch_pricing,
             )
         except Exception:
             logger.warning(
@@ -673,6 +709,11 @@ def predict_lifecycle_lora_batch(
             # Fall back to per-row inference so only genuinely bad rows
             # are marked None; healthy rows in the same chunk are preserved.
             import torch as _torch  # guaranteed available if we got here
+            import time as _time_fb
+
+            _fb_t0 = _time_fb.perf_counter()
+            fallback_stages: list[str] = []
+            fallback_success = 0
 
             for row_offset, row_features in enumerate(chunk_dicts):
                 global_idx = chunk_start + row_offset
@@ -703,16 +744,32 @@ def predict_lifecycle_lora_batch(
                     lp_t = _torch.tensor(row_label_lps)
                     p = _torch.softmax(lp_t, dim=0)
                     bi = int(_torch.argmax(p).item())
+                    stage = LIFECYCLE_STAGES[bi]
                     results[global_idx] = (
-                        LIFECYCLE_STAGES[bi],
+                        stage,
                         round(float(p[bi].item()), 4),
                     )
+                    fallback_stages.append(stage)
+                    fallback_success += 1
                 except Exception:
                     logger.debug(
                         "LoRA per-row retry failed for global index %d.",
                         global_idx,
                         exc_info=True,
                     )
+
+            _fb_runtime_s = _time_fb.perf_counter() - _fb_t0
+            # Emit telemetry for the fallback path so the slowest / most
+            # failure-prone chunks are not silently absent from observability.
+            _emit_lora_chunk(
+                chunk_size=len(chunk_dicts),
+                chunk_success=fallback_success,
+                chunk_stages=fallback_stages,
+                base_model_name=base_model_name,
+                parent_trace=parent_trace,
+                chunk_runtime_s=_fb_runtime_s,
+                pricing=_batch_pricing,
+            )
 
     return results
 
@@ -724,6 +781,11 @@ def _emit_lora_chunk(
     *,
     base_model_name: str = BASE_MODEL,
     parent_trace: object | None = None,
+    chunk_runtime_s: float | None = None,
+    chunk_cost_proxy: float | None = None,
+    chunk_estimated_cost_usd: float | None = None,
+    pricing_profile: str | None = None,
+    pricing: dict | None = None,
 ) -> None:
     """Emit a single Langfuse generation span for a LoRA inference chunk.
 
@@ -731,24 +793,55 @@ def _emit_lora_chunk(
     per-row events.  This bounds telemetry overhead to O(chunks) rather
     than O(rows) and reduces off-box data exposure.
 
+    ``pricing`` may be passed in from the caller so env vars are read once
+    per batch rather than once per chunk.  When omitted, load_pricing() is
+    called here as a fallback.
+
     No-ops silently when Langfuse is not configured.  Any telemetry failure
     is caught and logged — observability must never abort inference.
     """
     try:
         from collections import Counter
 
+        from entity_data_lakehouse.benchmark_costs import (
+            cost_proxy as _cost_proxy,
+            estimated_cost_usd as _estimated_cost_usd,
+            load_pricing as _load_pricing,
+        )
+
         stage_dist = dict(Counter(chunk_stages))
+        output_data: dict[str, Any] = {
+            "success_count": chunk_success,
+            "stage_distribution": stage_dist,
+        }
+        metadata: dict[str, Any] = {
+            "model": base_model_name,
+            "method": "batched_teacher_forced_log_prob",
+        }
+        if chunk_runtime_s is not None:
+            output_data["runtime_s"] = round(chunk_runtime_s, 4)
+            # Report both attempted and successful throughput so partial
+            # failure chunks are not misread as low-throughput runs.
+            output_data["attempted_rows_per_s"] = (
+                round(chunk_size / chunk_runtime_s, 2)
+                if chunk_runtime_s > 0 else 0.0
+            )
+            output_data["successful_rows_per_s"] = (
+                round(chunk_success / chunk_runtime_s, 2)
+                if chunk_runtime_s > 0 else 0.0
+            )
+            metadata["cost_proxy"] = _cost_proxy(chunk_runtime_s)
+            _pricing = pricing if pricing is not None else _load_pricing()
+            metadata["estimated_cost_usd"] = _estimated_cost_usd(
+                chunk_runtime_s, _pricing["lora_infer_usd_per_hour"]
+            )
+            metadata["pricing_profile"] = _pricing["pricing_profile"]
+
         generation_kwargs = dict(
             name="lifecycle_lora_batch_chunk",
             input={"chunk_size": chunk_size},
-            output={
-                "success_count": chunk_success,
-                "stage_distribution": stage_dist,
-            },
-            metadata={
-                "model": base_model_name,
-                "method": "batched_teacher_forced_log_prob",
-            },
+            output=output_data,
+            metadata=metadata,
         )
         emitter = parent_trace if parent_trace is not None else get_langfuse()
         gen = emitter.generation(**generation_kwargs)

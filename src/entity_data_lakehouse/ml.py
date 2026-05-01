@@ -780,7 +780,18 @@ def build_ml_predictions(
         logger.info("Wrote asset_lifecycle_predictions.parquet to %s", dw_root)
 
         try:
-            span.end(output={"prediction_rows": len(predictions)})
+            from .benchmark_costs import load_pricing as _load_pricing
+            _pricing_profile = _load_pricing()["pricing_profile"]
+        except Exception:
+            _pricing_profile = "benchmark_local_equivalent_v1"
+        try:
+            span.end(output={
+                "prediction_rows": len(predictions),
+                "benchmark": {
+                    "backend": _os.environ.get("ML_BACKEND", "sklearn"),
+                    "pricing_profile": _pricing_profile,
+                },
+            })
         except Exception:
             logger.debug("Langfuse span.end() failed on success path; ignoring.", exc_info=True)
         return {"asset_lifecycle_predictions": predictions}

@@ -324,8 +324,14 @@ python evals/run_evals.py
 ```
 
 The report is written to `evals/output/latest_report.json` and includes accuracy,
-per-class F1, and runtime for both backends. The LoRA entry is skipped gracefully
-if the adapter has not been trained or fails validation.
+per-class F1, **runtime split by training and inference**, **cost proxies**, and
+**equivalent-cloud USD estimates** for both backends. The `*_runtime_s` fields
+measure inference time; training time is reported separately in
+`*_training_runtime_s`. USD values are estimates from a declared rate card, not
+actual billed cost. The LoRA entry is skipped gracefully if the adapter has not
+been trained or fails validation.
+
+Rate-card defaults can be overridden via environment variables (see `.env.example`).
 
 ## ClickHouse Analytics Backend (optional)
 
@@ -407,12 +413,12 @@ LANGFUSE_HOST=https://cloud.langfuse.com   # or your self-hosted URL
 
 Current telemetry surface:
 
-| Event | Source |
-|---|---|
-| `sklearn_build_ml_predictions` trace + `build_ml_predictions` span | `ml.py` |
-| `lifecycle_lora_batch_chunk` generation | `ml_lora.py` chunk-level aggregate telemetry |
-| `lora_training` trace + `train_lora_adapter` span | `scripts/train_lora.py` |
-| `eval_lora` trace | `scripts/eval_lora.py` |
+| Event | Source | Cost/Runtime metadata |
+|---|---|---|
+| `sklearn_build_ml_predictions` trace + `build_ml_predictions` span | `ml.py` | Backend, pricing profile |
+| `lifecycle_lora_batch_chunk` generation | `ml_lora.py` | Chunk runtime, throughput, cost proxy, USD estimate |
+| `lora_training` trace + `train_lora_adapter` span | `scripts/train_lora.py` | Training runtime, USD estimate, pricing profile |
+| `evals_run` trace | `evals/run_evals.py` | Accuracy scores + runtime/cost benchmark metadata |
 
 When credentials are absent the repo still runs normally: a one-time warning is emitted and all Langfuse calls degrade to no-ops. Telemetry failures are intentionally non-fatal in both the pipeline and the training script.
 
@@ -425,6 +431,7 @@ When credentials are absent the repo still runs normally: a one-time warning is 
 | Warehouse semantics and SCD rationale | `docs/data_warehouse.md` |
 | Optional ClickHouse sink behavior | `src/entity_data_lakehouse/clickhouse_sink.py` |
 | Baseline ML plus optional LoRA override | `src/entity_data_lakehouse/ml.py` and `ml_lora.py` |
+| ML benchmark cost model (runtime + USD estimates) | `src/entity_data_lakehouse/benchmark_costs.py` |
 | Hybrid retrieval and API surface | `src/entity_data_lakehouse/search.py` and `api.py` |
 | Optional observability boundary | `src/entity_data_lakehouse/observability.py` |
 

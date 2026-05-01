@@ -102,6 +102,17 @@ def main() -> None:
         span = _NoOpSpan()
 
     try:
+        # Validate pricing config eagerly before training starts so a bad env
+        # var does not waste a full training run.
+        import json
+        import time
+        from entity_data_lakehouse.benchmark_costs import (
+            cost_proxy,
+            estimated_cost_usd,
+            load_pricing,
+        )
+        pricing = load_pricing()
+
         print(f"Loading reference data from {reference_root} ...")
         country_attrs = _load_country_attributes(reference_root)
         sector_params = _load_sector_lifecycle(reference_root)
@@ -122,6 +133,7 @@ def main() -> None:
             f"Training LoRA adapter ({args.epochs} epoch(s)) on base model {args.base_model} "
             f"(revision={args.revision}) ..."
         )
+        t0 = time.perf_counter()
         train_lora_adapter(
             training_jsonl=jsonl_path,
             output_dir=args.output,
@@ -129,10 +141,53 @@ def main() -> None:
             base_model=args.base_model,
             revision=args.revision,
         )
-        print(f"Adapter saved to {args.output}")
+        training_runtime_s = round(time.perf_counter() - t0, 4)
+        print(f"Adapter saved to {args.output} (training took {training_runtime_s}s)")
+
+        # Backfill the measured training runtime into adapter metadata.
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        meta_path = args.output / "adapter_metadata.json"
+        if not meta_path.exists():
+            _log.warning(
+                "adapter_metadata.json not found at %s; "
+                "training runtime and cost provenance will not be backfilled.",
+                meta_path,
+            )
+        else:
+            try:
+                meta = json.loads(meta_path.read_text())
+                if "training_benchmark" not in meta:
+                    _log.warning(
+                        "adapter_metadata.json at %s has no 'training_benchmark' key; "
+                        "training runtime and cost provenance will not be backfilled.",
+                        meta_path,
+                    )
+                else:
+                    tb = meta["training_benchmark"]
+                    tb["training_runtime_s"] = training_runtime_s
+                    tb["training_cost_proxy"] = cost_proxy(training_runtime_s)
+                    tb["training_estimated_cost_usd"] = estimated_cost_usd(
+                        training_runtime_s, pricing["lora_train_usd_per_hour"]
+                    )
+                    meta_path.write_text(json.dumps(meta, indent=2))
+            except (json.JSONDecodeError, OSError) as _e:
+                _log.warning(
+                    "Failed to backfill training runtime into %s: %s. "
+                    "Adapter is usable but amortized-cost reporting may be incomplete.",
+                    meta_path, _e,
+                )
 
         try:
-            span.end(output={"adapter_path": str(args.output), "status": "complete"})
+            span.end(output={
+                "adapter_path": str(args.output),
+                "status": "complete",
+                "training_runtime_s": training_runtime_s,
+                "training_estimated_cost_usd": estimated_cost_usd(
+                    training_runtime_s, pricing["lora_train_usd_per_hour"]
+                ),
+                "pricing_profile": pricing["pricing_profile"],
+            })
         except Exception:
             pass
     except Exception:

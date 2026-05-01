@@ -235,24 +235,53 @@ Telemetry setup, `span.end()`, and `flush()` failures are intentionally non-fata
 make eval
 ```
 
-The report is written to `evals/output/latest_report.json`.  Schema:
+The report is written to `evals/output/latest_report.json`.  The harness is
+**runtime- and cost-aware**: `*_runtime_s` fields measure inference time,
+training time is reported separately, and cost fields use an equivalent-cloud
+rate card.  Schema (abbreviated — see `evals/output/latest_report.json` for
+the full current output):
 
 ```json
 {
   "report_timestamp": "...",
   "test_samples": 60,
+  "cost_estimate_method": "equivalent_cloud_rate_card",
+  "pricing_profile": "benchmark_local_equivalent_v1",
+  "pricing_assumptions": {
+    "sklearn_usd_per_hour": 0.20,
+    "lora_train_usd_per_hour": 1.00,
+    "lora_infer_usd_per_hour": 1.00,
+    "lora_amortization_samples": 10000,
+    "notes": "Equivalent benchmark rates for local runs; not actual billed cloud cost."
+  },
+  "cost_proxy_unit": "compute_seconds",
   "sklearn_accuracy": 0.82,
   "sklearn_f1_per_class": {...},
+  "sklearn_training_runtime_s": 1.0,
   "sklearn_runtime_s": 0.4,
+  "sklearn_training_estimated_cost_usd": 0.00006,
+  "sklearn_estimated_cost_usd": 0.000002,
+  "sklearn_cost_per_sample_usd": 0.000001,
   "lora_accuracy": null,
   "lora_f1_per_class": null,
+  "lora_training_runtime_s": null,
   "lora_runtime_s": null,
+  "lora_estimated_cost_usd": null,
+  "lora_cost_per_sample_usd": null,
+  "lora_amortized_cost_per_sample_usd": null,
   "lora_available": false,
+  "accuracy_delta_lora_minus_sklearn": null,
+  "runtime_ratio_lora_to_sklearn": null,
+  "cost_ratio_lora_to_sklearn": null,
+  "quality_latency_tradeoff_summary": "...",
   "schema_valid": true
 }
 ```
 
-LoRA fields are `null` when the adapter has not been trained or the saved adapter fails validation.
+LoRA fields are `null` when the adapter has not been trained or the saved
+adapter fails validation.  USD values are **estimates derived from a declared
+rate card**, not actual billed cloud cost.  The rate card defaults can be
+overridden via environment variables (see `.env.example`).
 
 ### Design
 
@@ -260,9 +289,10 @@ LoRA fields are `null` when the adapter has not been trained or the saved adapte
 |---|---|
 | `src/entity_data_lakehouse/ml.py` | Baseline sklearn training/inference, optional LoRA override wiring, fallback-to-sklearn behavior |
 | `src/entity_data_lakehouse/ml_lora.py` | Prompt construction, JSONL generation, constrained adapter training, validated loading, teacher-forced inference |
-| `scripts/train_lora.py` | CLI to generate synthetic JSONL and fine-tune the adapter on the pinned base model + revision |
+| `src/entity_data_lakehouse/benchmark_costs.py` | Shared cost model: rate-card loading, proxy and USD estimation, amortization, tradeoff summary |
+| `scripts/train_lora.py` | CLI to generate synthetic JSONL and fine-tune the adapter on the pinned base model + revision; records training benchmark metadata |
 | `scripts/eval_lora.py` | Accuracy / F1 / confusion matrix: LoRA vs sklearn baseline |
-| `models/lifecycle_lora_adapter/` | Saved PEFT adapter weights plus `adapter_metadata.json` provenance |
+| `models/lifecycle_lora_adapter/` | Saved PEFT adapter weights plus `adapter_metadata.json` provenance and training benchmark summary |
 
 Base model: `Qwen/Qwen2.5-0.5B-Instruct`
 Pinned default revision: `BASE_MODEL_REVISION` in `ml_lora.py` (overrideable via `LORA_BASE_MODEL_REVISION` or `scripts/train_lora.py --revision`)

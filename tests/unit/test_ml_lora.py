@@ -544,6 +544,44 @@ def test_emit_lora_chunk_emits_aggregate_telemetry(monkeypatch) -> None:
         assert col not in str(captured[0]), f"'{col}' must not appear in chunk telemetry"
 
 
+def test_emit_lora_chunk_includes_runtime_and_cost(monkeypatch) -> None:
+    """When chunk_runtime_s is provided, telemetry must include runtime, throughput, and cost fields."""
+    from entity_data_lakehouse.ml_lora import _emit_lora_chunk
+
+    captured: list[dict] = []
+
+    class _FakeGen:
+        def end(self): pass
+
+    class _FakeLF:
+        def generation(self, **kwargs):
+            captured.append(kwargs)
+            return _FakeGen()
+
+    monkeypatch.setattr(
+        "entity_data_lakehouse.ml_lora.get_langfuse",
+        lambda: _FakeLF(),
+    )
+
+    _emit_lora_chunk(
+        chunk_size=10,
+        chunk_success=10,
+        chunk_stages=["operating"] * 10,
+        base_model_name="test-model",
+        chunk_runtime_s=2.5,
+    )
+
+    assert len(captured) == 1
+    out = captured[0]["output"]
+    assert out["runtime_s"] == 2.5
+    assert out["attempted_rows_per_s"] == 4.0   # chunk_size=10 / 2.5s
+    assert out["successful_rows_per_s"] == 4.0  # chunk_success=10 / 2.5s
+    meta = captured[0]["metadata"]
+    assert "cost_proxy" in meta
+    assert "estimated_cost_usd" in meta
+    assert "pricing_profile" in meta
+
+
 def test_emit_lora_chunk_uses_parent_trace_when_provided(monkeypatch) -> None:
     """When parent_trace is given, generation must be emitted on it, not on the global client."""
     from entity_data_lakehouse.ml_lora import _emit_lora_chunk
@@ -575,3 +613,88 @@ def test_emit_lora_chunk_uses_parent_trace_when_provided(monkeypatch) -> None:
 
     assert len(parent_captured) == 1, "generation must be emitted on parent_trace"
     assert len(global_captured) == 0, "global Langfuse client must NOT be called when parent_trace is set"
+
+
+# ---------------------------------------------------------------------------
+# train_lora_adapter — provenance metadata
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_into_existing_dir_refreshes_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Retraining into an existing adapter directory must overwrite base_model and
+    revision so stale provenance from the previous run is never preserved."""
+    import json as _json
+    import sys
+
+    from entity_data_lakehouse.ml_lora import BASE_MODEL, BASE_MODEL_REVISION
+
+    # ---- Stale metadata left by a previous training run -------------------
+    stale_meta = {
+        "base_model": "old/model",
+        "revision": "old-revision",
+        "training_benchmark": {"training_runtime_s": 42},
+    }
+    meta_path = tmp_path / "adapter_metadata.json"
+    meta_path.write_text(_json.dumps(stale_meta))
+
+    # Minimal JSONL training file so train_lora_adapter has something to pass
+    jsonl_path = tmp_path / "train.jsonl"
+    jsonl_path.write_text('{"prompt": "q", "completion": "operating"}\n')
+
+    # ---- Stub out heavy deps via sys.modules so lazy imports resolve -------
+    fake_tokenizer = MagicMock()
+    fake_tokenizer.from_pretrained = MagicMock(return_value=fake_tokenizer)
+    fake_tokenizer.pad_token = None
+    fake_tokenizer.eos_token = "<eos>"
+    fake_tokenizer.save_pretrained = MagicMock()
+
+    fake_model = MagicMock()
+    fake_model.save_pretrained = MagicMock()
+    fake_model.print_trainable_parameters = MagicMock()
+
+    fake_auto_model = MagicMock()
+    fake_auto_model.from_pretrained = MagicMock(return_value=fake_model)
+
+    fake_trainer_instance = MagicMock()
+    fake_trainer_instance.train = MagicMock()
+    fake_trainer_instance.model = fake_model
+
+    fake_transformers = MagicMock()
+    fake_transformers.AutoTokenizer = fake_tokenizer
+    fake_transformers.AutoModelForCausalLM = fake_auto_model
+
+    fake_peft = MagicMock()
+    fake_peft.LoraConfig = MagicMock(return_value=MagicMock())
+    fake_peft.get_peft_model = MagicMock(return_value=fake_model)
+
+    fake_trl = MagicMock()
+    fake_trl.SFTConfig = MagicMock(return_value=MagicMock())
+    fake_trl.SFTTrainer = MagicMock(return_value=fake_trainer_instance)
+
+    fake_datasets = MagicMock()
+    fake_dataset_obj = MagicMock()
+    fake_dataset_obj.map = MagicMock(return_value=fake_dataset_obj)
+    fake_datasets.load_dataset = MagicMock(return_value=fake_dataset_obj)
+
+    fake_torch = MagicMock()
+    fake_torch.float32 = "float32"
+
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+    monkeypatch.setitem(sys.modules, "trl", fake_trl)
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    from entity_data_lakehouse.ml_lora import train_lora_adapter
+    train_lora_adapter(
+        training_jsonl=jsonl_path,
+        output_dir=tmp_path,
+        base_model=BASE_MODEL,
+        revision=BASE_MODEL_REVISION,
+    )
+
+    written = _json.loads(meta_path.read_text())
+    assert written["base_model"] == BASE_MODEL, "base_model must be refreshed on retrain"
+    assert written["revision"] == BASE_MODEL_REVISION, "revision must be refreshed on retrain"
