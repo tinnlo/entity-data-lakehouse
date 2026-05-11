@@ -13,3 +13,7 @@ dbt/logs/
 /models/
 
 evals/output/*.json
+
+# Environment files with credentials
+.env
+.env.local

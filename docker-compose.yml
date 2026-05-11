@@ -18,18 +18,28 @@ services:
       # cannot be bypassed even with this flag set.
       # Default: false. Set to "true" in your .env when using the clickhouse profile.
       CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK: "${CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK:-false}"
+      USE_POSTGRES: "${USE_POSTGRES:-false}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_DATABASE: "${POSTGRES_DATABASE:-lakehouse}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+      POSTGRES_POOL_MIN: "${POSTGRES_POOL_MIN:-2}"
+      POSTGRES_POOL_MAX: "${POSTGRES_POOL_MAX:-10}"
     volumes:
       - ./sample_data:/app/sample_data
       - ./bronze:/app/bronze
       - ./silver:/app/silver
       - ./gold:/app/gold
-    # When USE_CLICKHOUSE=true the sink runs inside the pipeline. Gate on the
-    # ClickHouse healthcheck so the pipeline does not start before the server
-    # is ready to accept connections.
+    # When USE_CLICKHOUSE=true or USE_POSTGRES=true the sink runs inside the pipeline.
+    # Gate on healthchecks so the pipeline does not start before servers are ready.
     depends_on:
       clickhouse:
         condition: service_healthy
         required: false   # no-op when --profile clickhouse is not active
+      postgres:
+        condition: service_healthy
+        required: false   # no-op when --profile postgres is not active
 
   # Optional ClickHouse analytics backend.
   # Start with: USE_CLICKHOUSE=true docker compose --profile clickhouse up --build
@@ -48,6 +58,27 @@ services:
         hard: 262144
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Optional PostgreSQL serving layer.
+  # Start with: USE_POSTGRES=true docker compose --profile postgres up --build
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DATABASE:-lakehouse}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -79,12 +110,23 @@ services:
       CLICKHOUSE_SECURE: "${CLICKHOUSE_SECURE:-false}"
       CLICKHOUSE_VERIFY: "${CLICKHOUSE_VERIFY:-true}"
       CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK: "${CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK:-false}"
+      USE_POSTGRES: "${USE_POSTGRES:-false}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_DATABASE: "${POSTGRES_DATABASE:-lakehouse}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+      POSTGRES_POOL_MIN: "${POSTGRES_POOL_MIN:-2}"
+      POSTGRES_POOL_MAX: "${POSTGRES_POOL_MAX:-10}"
     volumes:
       - ./:/opt/airflow/repo
     depends_on:
       clickhouse:
         condition: service_healthy
         required: false   # no-op when --profile clickhouse is not active
+      postgres:
+        condition: service_healthy
+        required: false   # no-op when --profile postgres is not active
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8793:8793"
@@ -92,3 +134,4 @@ services:
 
 volumes:
   clickhouse_data:
+  postgres_data:

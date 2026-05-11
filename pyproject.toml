@@ -43,6 +43,9 @@ search = [
 clickhouse = [
   "clickhouse-connect>=0.7.0",
 ]
+postgres = [
+  "psycopg2-binary>=2.9.9",
+]
 observability = [
   "langfuse>=2.0.0",
 ]

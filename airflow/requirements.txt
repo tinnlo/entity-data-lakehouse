@@ -5,3 +5,5 @@ numpy>=1.26.0
 scikit-learn>=1.5.0
 dbt-core>=1.8.0
 dbt-duckdb>=1.8.0
+clickhouse-connect>=0.7.0
+psycopg2-binary>=2.9.9

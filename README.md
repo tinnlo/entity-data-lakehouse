@@ -9,8 +9,8 @@ The interesting part is not dataset size. The interesting part is the contract a
 |---|---|
 | Bronze -> silver -> gold discipline | The repo demonstrates contract-driven staging instead of one-shot transformation scripts. |
 | Hybrid warehouse outputs | Entity and ownership history are modeled with both SCD4 and SCD2 patterns so consumers can choose full observational fidelity or stable current/history tables. |
-| Rollback-safe analytics publication | Every pipeline run emits a machine-readable `publish_report.json` with row counts, rollback status, and sink target summary. A `dry_run` mode validates the full pipeline and ClickHouse schemas without mutating any sink. |
-| DuckDB-authoritative, ClickHouse-optional shape | DuckDB remains authoritative, while dbt, Airflow, ClickHouse, search, LoRA, and Langfuse are all explicit opt-ins. |
+| Rollback-safe analytics publication | Every pipeline run emits a machine-readable `publish_report.json` with row counts, rollback status, and sink target summary. A `dry_run` mode validates the full pipeline and sink schemas without mutating any sink. |
+| DuckDB-authoritative, optional serving layers | DuckDB remains authoritative, while dbt, Airflow, ClickHouse, PostgreSQL, search, LoRA, and Langfuse are all explicit opt-ins. |
 | Safe ML extension path | The sklearn baseline remains the default; the LoRA path is constrained, revision-pinned, trusted-root validated, and falls back cleanly when unavailable. |
 | ML quality / latency / cost benchmarking | The eval harness compares sklearn vs LoRA on accuracy, runtime, and equivalent-cloud USD estimates. |
 | Rebuildable architecture demo | `sample_data/` plus bundled reference data are sufficient to rebuild the entire demo locally with no external services required. |
@@ -44,6 +44,7 @@ subgraph EXT["Optional consumers and extensions"]
   D["dbt<br/>main_analytics.*"]
   HS["Hybrid search<br/>BM25 + vectors + RRF"]
   CH["ClickHouse<br/>write-through analytics sink"]
+  PG["PostgreSQL<br/>write-through serving layer"]
   LF["Langfuse<br/>optional telemetry"]
 end
 
@@ -53,6 +54,7 @@ SI --> ML --> G
 G --> D
 G --> HS
 G -. "USE_CLICKHOUSE=true" .-> CH
+G -. "USE_POSTGRES=true" .-> PG
 ML -. "LANGFUSE_* set" .-> LF
 
 classDef bronze fill:#ffe6e6,stroke:#b30000,color:#111827,stroke-width:1.5px
@@ -64,7 +66,7 @@ classDef artifact fill:#fff8e1,stroke:#e65100,color:#111827,stroke-width:1.5px,s
 class S,B bronze
 class SI,ML silver
 class G golden
-class R,CH,LF external
+class R,CH,PG,LF external
 class D,HS artifact
 
 style INPUTS fill:none,stroke:#64748b,color:#cbd5e1,stroke-width:1px,stroke-dasharray:4 4
@@ -120,16 +122,21 @@ Every pipeline run emits a `publish_report.json` artifact with:
 - `run_id` — unique identifier for the run
 - `publish_mode` — `commit` or `dry_run`
 - `status` — `success` or `failed`
-- `tables_attempted` — the three ClickHouse sink tables
+- `tables_attempted` — sink tables (ClickHouse and/or PostgreSQL if enabled)
 - `row_counts` — per-layer row counts
-- `rollback_status` — `not_applicable` | `clean` | `rolled_back` | `partial_rollback_failed`
-- `sink_target` — ClickHouse status, tables refreshed, batch id, and schema validation results
+- `rollback_status` — `not_applicable` | `clean` | `rolled_back` | `partial_rollback_failed` | `partial_publish`
+  - `not_applicable`: no sinks ran
+  - `clean`: all enabled sinks succeeded without rollback
+  - `rolled_back`: at least one sink failed and rolled back successfully
+  - `partial_rollback_failed`: rollback itself failed (manual recovery needed)
+  - `partial_publish`: one sink succeeded while the other failed or didn't run (dual-sink divergence)
+- `sink_target` — sink status, tables refreshed, batch id, and schema validation results (ClickHouse and/or PostgreSQL)
 - `public_safety` — scan result and any findings
 - `artifacts_written` — list of gold artefacts written (parquet + DuckDB paths; empty in `dry_run`)
 
 ### `publish_mode=dry_run`
 
-Validates the full pipeline and ClickHouse sink schemas. Writes only `publish_report.json` (and creates its parent directory if it does not already exist) — no other pipeline disk writes (no parquet, no DuckDB, no ClickHouse mutations).
+Validates the full pipeline and sink schemas (ClickHouse and/or PostgreSQL if enabled). Writes only `publish_report.json` (and creates its parent directory if it does not already exist) — no other pipeline disk writes (no parquet, no DuckDB, no sink mutations).
 Useful for CI preflight, demo review, and pre-publish checks.
 
 ```bash
@@ -146,7 +153,7 @@ python scripts/run_demo.py --publish-mode dry_run
 
 ### `publish_mode=commit` (default)
 
-Full pipeline with all disk writes and optional ClickHouse sink. Current behaviour is preserved exactly.
+Full pipeline with all disk writes and optional sinks (ClickHouse and/or PostgreSQL). Current behaviour is preserved exactly.
 
 ```bash
 python scripts/run_pipeline.py --publish-mode commit
@@ -434,20 +441,24 @@ This keeps DuckDB authoritative while ensuring ClickHouse readers never see part
 The `lakehouse` service is a no-op when `USE_CLICKHOUSE` is unset or `false`; the
 default `docker compose up --build` path is unaffected.
 
-**Connection config** (all optional; shown with defaults):
+**Connection config:**
+
+Copy `.env.example` to `.env` and configure as needed:
 
 ```bash
-CLICKHOUSE_HOST=clickhouse
-CLICKHOUSE_PORT=8123
-CLICKHOUSE_DATABASE=lakehouse
-CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=
-CLICKHOUSE_SECURE=false
-CLICKHOUSE_VERIFY=true
-CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK=false
+cp .env.example .env
+# Edit .env and set connection parameters
 ```
 
-Copy `.env.example` to `.env` to configure locally.
+Available configuration (see `.env.example` for defaults):
+- `CLICKHOUSE_HOST` - hostname (default: `clickhouse` for Docker Compose)
+- `CLICKHOUSE_PORT` - port (default: `8123`)
+- `CLICKHOUSE_DATABASE` - database name (default: `lakehouse`)
+- `CLICKHOUSE_USER` - username (default: `default`)
+- `CLICKHOUSE_PASSWORD` - password (default: empty for local dev)
+- `CLICKHOUSE_SECURE` - use TLS (default: `false`)
+- `CLICKHOUSE_VERIFY` - verify TLS certificates (default: `true`)
+- `CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK` - allow plaintext on private networks (default: `false`)
 
 **Security notes:**
 
@@ -455,6 +466,81 @@ Copy `.env.example` to `.env` to configure locally.
 - plaintext HTTP is rejected for non-local/public hosts
 - `CLICKHOUSE_ALLOW_INSECURE_PRIVATE_NETWORK=true` is only intended for trusted private or compose networks, never public hosts
 - the Airflow service requires an explicit `AIRFLOW_ADMIN_PASSWORD` in `.env`
+
+## PostgreSQL Serving Layer (optional)
+
+By default the pipeline writes only to DuckDB (`gold/entity_lakehouse.duckdb`).
+An optional PostgreSQL sink is available for operational serving use cases, but DuckDB remains the source of truth.
+
+**Start with PostgreSQL:**
+
+```bash
+USE_POSTGRES=true docker compose --profile postgres up --build
+```
+
+**Stop:**
+
+```bash
+docker compose --profile postgres down
+```
+
+The sink auto-creates two tables in the `lakehouse` database (or `POSTGRES_DATABASE` if overridden):
+
+| Table | Contents |
+|---|---|
+| `entity_master_event_log` | Entity lifecycle events |
+| `owner_infrastructure_exposure_snapshot` | Per-owner exposure snapshots |
+
+Each sink load is an atomic full refresh:
+
+- rows are first written into staging tables (`<table>_staging`)
+- live and staging tables are swapped with `ALTER TABLE ... RENAME TO`
+- already-swapped tables are rolled back if a later table fails
+- the successful `batch_id` is only published after both tables refresh
+
+This keeps DuckDB authoritative while ensuring PostgreSQL readers never see partially refreshed live tables.
+
+The `lakehouse` service is a no-op when `USE_POSTGRES` is unset or `false`; the
+default `docker compose up --build` path is unaffected.
+
+**Connection config:**
+
+Copy `.env.example` to `.env` and set your credentials:
+
+```bash
+cp .env.example .env
+# Edit .env and set POSTGRES_PASSWORD and other values as needed
+```
+
+Available configuration (see `.env.example` for defaults):
+- `POSTGRES_HOST` - hostname (default: `postgres` for Docker Compose)
+- `POSTGRES_PORT` - port (default: `5432`)
+- `POSTGRES_DATABASE` - database name (default: `lakehouse`)
+- `POSTGRES_USER` - username (default: `postgres`)
+- `POSTGRES_PASSWORD` - **required**, no default
+- `POSTGRES_POOL_MIN` - minimum pool connections (default: `2`)
+- `POSTGRES_POOL_MAX` - maximum pool connections (default: `10`)
+
+**Connection pooling:**
+
+The sink uses `psycopg2.pool.ThreadedConnectionPool` to manage database connections efficiently. The pool is created once per process and reused across pipeline runs.
+
+**Freshness metadata:**
+
+Each successful refresh writes a row to the `_refresh_metadata` table with:
+- `table_name` — name of the refreshed table
+- `last_refreshed_at` — timestamp of the refresh
+- `batch_id` — unique identifier for this refresh
+- `row_count` — number of rows in the table
+
+Query freshness:
+```sql
+SELECT table_name, last_refreshed_at, batch_id, row_count 
+FROM _refresh_metadata 
+ORDER BY last_refreshed_at DESC;
+```
+
+Query this table to determine data freshness in PostgreSQL.
 
 ## Observability (optional)
 
@@ -494,6 +580,8 @@ When credentials are absent the repo still runs normally: a one-time warning is 
 | Warehouse semantics and SCD rationale | `docs/data_warehouse.md` |
 | Optional ClickHouse sink behavior | `src/entity_data_lakehouse/clickhouse_sink.py` |
 | ClickHouse dry_run schema validation | `clickhouse_sink.validate_sink_schema()` |
+| Optional PostgreSQL sink behavior | `src/entity_data_lakehouse/postgres_sink.py` |
+| PostgreSQL dry_run schema validation | `postgres_sink.validate_sink_schema()` |
 | Baseline ML plus optional LoRA override | `src/entity_data_lakehouse/ml.py` and `ml_lora.py` |
 | ML benchmark cost model (runtime + USD estimates) | `src/entity_data_lakehouse/benchmark_costs.py` |
 | Hybrid retrieval and API surface | `src/entity_data_lakehouse/search.py` and `api.py` |

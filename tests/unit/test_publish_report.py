@@ -232,11 +232,9 @@ class TestPublishReport:
         assert dry_run_report["status"] == "success"
 
     def test_report_has_tables_attempted(self, commit_report):
-        assert set(commit_report["tables_attempted"]) == {
-            "ownership_current",
-            "owner_infrastructure_exposure_snapshot",
-            "ml_asset_lifecycle_predictions",
-        }
+        # When no sinks are enabled (USE_CLICKHOUSE=false, USE_POSTGRES=false),
+        # tables_attempted should be empty
+        assert commit_report["tables_attempted"] == []
 
     def test_report_has_row_counts(self, commit_report):
         rc = commit_report["row_counts"]
@@ -543,7 +541,7 @@ class TestSinkSummaryPropagation:
         """A failing ClickHouse write that attaches __sink_summary__ must appear in report."""
         import entity_data_lakehouse.clickhouse_sink as cs_mod
 
-        def _failing_sink(gold_outputs, ml_outputs):
+        def _failing_sink(gold_outputs, ml_outputs, *, defer_cleanup=False):
             exc = RuntimeError("simulated table EXCHANGE failure")
             exc.__sink_summary__ = {  # type: ignore[attr-defined]
                 "tables_refreshed": ["ownership_current"],

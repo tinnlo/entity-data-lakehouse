@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY scripts ./scripts
-RUN pip install --no-cache-dir ".[dev]"
+RUN pip install --no-cache-dir ".[dev,clickhouse,postgres]"
 
 COPY . .
 

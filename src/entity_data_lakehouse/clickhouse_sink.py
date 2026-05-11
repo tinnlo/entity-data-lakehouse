@@ -64,10 +64,14 @@ Requires the [clickhouse] optional dependency group::
 
 Public API
 ----------
-- ``write_gold_to_clickhouse(gold_outputs, ml_outputs)`` — full sink with
-  atomic refresh and rollback.  Returns a sink summary dict.
+- ``write_gold_to_clickhouse(gold_outputs, ml_outputs, *, defer_cleanup=False)`` —
+  full sink with atomic refresh and rollback. Returns a sink summary dict.
+- ``cleanup_clickhouse_rollback(ex_live_tables)`` — drop rollback tables after
+  dual-sink coordination completes successfully.
+- ``rollback_clickhouse(ex_live_tables, refreshed_tables)`` — roll back ClickHouse
+  after PostgreSQL failure in dual-sink mode.
 - ``validate_sink_schema(gold_outputs, ml_outputs)`` — schema-only validation
-  without connecting to ClickHouse.  Safe for ``dry_run`` mode.
+  without connecting to ClickHouse. Safe for ``dry_run`` mode.
 
 Usage (from pipeline.py)::
 
@@ -239,7 +243,9 @@ def _dtype_matches_clickhouse(ch_type: str, series: "pd.Series") -> bool:
     if ch_type == "Int64":
         return bool(is_integer_dtype(series) and not is_bool_dtype(series))
     if ch_type == "UInt8":
-        return bool(is_bool_dtype(series) or str(series.dtype).lower().startswith("uint"))
+        return bool(
+            is_bool_dtype(series) or str(series.dtype).lower().startswith("uint")
+        )
     return True
 
 
@@ -290,14 +296,16 @@ def validate_sink_schema(
     for table_name, (dict_name, key) in _TABLE_SOURCES.items():
         df = all_frames[dict_name].get(key)
         if df is None:
-            results.append({
-                "table": table_name,
-                "status": "failed",
-                "error": (
-                    f"ClickHouse sink expected key '{key}' in {dict_name}, "
-                    "but it was missing."
-                ),
-            })
+            results.append(
+                {
+                    "table": table_name,
+                    "status": "failed",
+                    "error": (
+                        f"ClickHouse sink expected key '{key}' in {dict_name}, "
+                        "but it was missing."
+                    ),
+                }
+            )
             continue
         try:
             df_stamped = df.copy()
@@ -315,6 +323,8 @@ def validate_sink_schema(
 def write_gold_to_clickhouse(
     gold_outputs: dict[str, "pd.DataFrame"],
     ml_outputs: dict[str, "pd.DataFrame"],
+    *,
+    defer_cleanup: bool = False,
 ) -> dict:
     """Load gold analytics tables into ClickHouse using atomic staging-table swap.
 
@@ -345,6 +355,11 @@ def write_gold_to_clickhouse(
         Dict of DataFrames produced by ``build_gold_outputs`` (gold layer).
     ml_outputs:
         Dict of DataFrames produced by ``build_ml_predictions`` (ML layer).
+    defer_cleanup:
+        When True, skip dropping ex-live rollback tables on success. Used in
+        dual-sink mode to preserve ClickHouse rollback capability until
+        PostgreSQL completes. Caller must invoke ``cleanup_clickhouse_rollback()``
+        after the second sink finishes.
 
     Returns
     -------
@@ -417,7 +432,10 @@ def write_gold_to_clickhouse(
 
         # All tables loaded successfully — publish the batch id so downstream
         # queries can obtain a consistent cross-table snapshot marker.
-        _publish_batch_id(client, cfg["database"], run_id)
+        # In dual-sink mode (defer_cleanup=True), defer batch_id publication until
+        # after PostgreSQL commits to prevent serving divergent snapshots.
+        if not defer_cleanup:
+            _publish_batch_id(client, cfg["database"], run_id)
 
     except Exception:
         # Roll back: re-exchange each successfully-swapped table back to the
@@ -448,7 +466,9 @@ def write_gold_to_clickhouse(
                 client.command(f"DROP TABLE IF EXISTS {db}.{ex_live}")
             except Exception:
                 pass
-        rollback_status = "partial_rollback_failed" if rollback_failed else "rolled_back"
+        rollback_status = (
+            "partial_rollback_failed" if rollback_failed else "rolled_back"
+        )
         # Attach structured summary to the exception so pipeline.py can read it
         # via exc.__sink_summary__, then re-raise so callers still see the
         # original exception type.
@@ -464,12 +484,16 @@ def write_gold_to_clickhouse(
             _exc.__sink_summary__ = _sink_summary  # type: ignore[attr-defined]
             raise
 
-    # Success path: drop the displaced ex-live tables now that the batch is published.
-    for db, ex_live in ex_live_tables:
-        try:
-            client.command(f"DROP TABLE IF EXISTS {db}.{ex_live}")
-        except Exception:
-            logger.warning("Could not drop ex-live staging table %s.%s; ignoring.", db, ex_live)
+    # Success path: drop the displaced ex-live tables now that the batch is published,
+    # unless defer_cleanup is True (dual-sink mode waiting for PostgreSQL).
+    if not defer_cleanup:
+        for db, ex_live in ex_live_tables:
+            try:
+                client.command(f"DROP TABLE IF EXISTS {db}.{ex_live}")
+            except Exception:
+                logger.warning(
+                    "Could not drop ex-live staging table %s.%s; ignoring.", db, ex_live
+                )
 
     logger.info("ClickHouse sink complete (run_id=%s).", run_id)
     return {
@@ -477,7 +501,502 @@ def write_gold_to_clickhouse(
         "batch_id": run_id,
         "status": "success",
         "rollback_status": "clean",
+        "ex_live_tables": ex_live_tables if defer_cleanup else [],
     }
+
+
+def cleanup_clickhouse_rollback(ex_live_tables: list[tuple[str, str]]) -> None:
+    """Drop ex-live rollback tables after dual-sink coordination completes.
+
+    Called by pipeline.py after PostgreSQL succeeds when both sinks are enabled.
+    If this function is never called (e.g., PostgreSQL failed), the ex-live tables
+    remain in ClickHouse as rollback artifacts for manual recovery.
+
+    Parameters
+    ----------
+    ex_live_tables:
+        List of (database, ex_live_table_name) tuples returned by
+        write_gold_to_clickhouse() when defer_cleanup=True.
+    """
+    if not ex_live_tables:
+        return
+
+    try:
+        import clickhouse_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "clickhouse-connect is required for cleanup_clickhouse_rollback(). "
+            "Install with: pip install -e '.[clickhouse]'"
+        ) from exc
+
+    cfg = _get_config()
+    client = _get_client(cfg)
+
+    for db, ex_live in ex_live_tables:
+        try:
+            client.command(f"DROP TABLE IF EXISTS {db}.{ex_live}")
+        except Exception:
+            logger.warning(
+                "Could not drop ex-live staging table %s.%s; ignoring.", db, ex_live
+            )
+
+    logger.info(
+        "Cleaned up %d ClickHouse rollback tables after dual-sink success.",
+        len(ex_live_tables),
+    )
+
+
+def publish_clickhouse_batch_id(batch_id: str) -> None:
+    """Publish the batch_id to ClickHouse after dual-sink coordination completes.
+
+    Called by pipeline.py after PostgreSQL succeeds when both sinks are enabled.
+    This makes the new ClickHouse snapshot visible to downstream queries by writing
+    the batch_id to lakehouse_batch_log.
+
+    In dual-sink mode, write_gold_to_clickhouse() defers batch_id publication to
+    prevent serving divergent snapshots (ClickHouse on new batch while PostgreSQL
+    is still on old batch). This function completes the publication after PostgreSQL
+    commits.
+
+    Parameters
+    ----------
+    batch_id:
+        The batch_id (run_id) returned by write_gold_to_clickhouse().
+    """
+    try:
+        import clickhouse_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "clickhouse-connect is required for publish_clickhouse_batch_id(). "
+            "Install with: pip install -e '.[clickhouse]'"
+        ) from exc
+
+    cfg = _get_config()
+    client = _get_client(cfg)
+    _publish_batch_id(client, cfg["database"], batch_id)
+    logger.info("Published ClickHouse batch_id after dual-sink success: %s", batch_id)
+
+
+def rollback_clickhouse(
+    ex_live_tables: list[tuple[str, str]],
+    refreshed_tables: list[str],
+    expected_batch_id: str,
+) -> str:
+    """Roll back ClickHouse tables after PostgreSQL failure in dual-sink mode.
+
+    Called by pipeline.py when PostgreSQL fails after ClickHouse succeeded.
+    Exchanges each live table back with its ex-live rollback table to restore
+    the previous snapshot.
+
+    Parameters
+    ----------
+    ex_live_tables:
+        List of (database, ex_live_table_name) tuples returned by
+        write_gold_to_clickhouse() when defer_cleanup=True.
+    refreshed_tables:
+        List of live table names that were successfully swapped.
+    expected_batch_id:
+        The batch_id that was published by the failed run. Used to verify
+        no other pipeline published after us before rolling back.
+
+    Returns
+    -------
+    str
+        Rollback status: "rolled_back" or "partial_rollback_failed".
+    """
+    if not ex_live_tables:
+        return "not_applicable"
+
+    try:
+        import clickhouse_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "clickhouse-connect is required for rollback_clickhouse(). "
+            "Install with: pip install -e '.[clickhouse]'"
+        ) from exc
+
+    cfg = _get_config()
+    client = _get_client(cfg)
+
+    # Verify the current batch_id matches what we expect before rolling back.
+    # If another pipeline published after us, we must not roll back their data.
+    # Note: In dual-sink mode with deferred publication, expected_batch_id may not
+    # be in lakehouse_batch_log yet (publication happens after PostgreSQL commits).
+    # In that case, we check if the *previous* batch_id is still current, which
+    # means no concurrent run has published since our EXCHANGE.
+    db = cfg["database"]
+
+    # Check if lakehouse_batch_log exists first.
+    # In dual-sink mode with deferred publication, the table may not exist yet
+    # if this is the first publish and PostgreSQL failed before ClickHouse batch_id publication.
+    batch_log_exists = False
+    try:
+        table_check = client.query(
+            f"SELECT 1 FROM system.tables WHERE database = '{db}' AND name = 'lakehouse_batch_log'"
+        )
+        batch_log_exists = bool(table_check.result_rows)
+    except Exception as check_exc:
+        logger.error(
+            "Failed to check if lakehouse_batch_log exists: %s — aborting rollback to prevent data corruption.",
+            check_exc,
+        )
+        return "partial_rollback_failed"
+
+    if not batch_log_exists:
+        # Table doesn't exist - deferred publication mode before first publish.
+        # This is the expected state when PostgreSQL fails before ClickHouse batch_id publication.
+        # Safe to proceed with rollback since no batch_id has been published yet.
+        logger.info(
+            "lakehouse_batch_log does not exist yet (deferred publication). "
+            "Proceeding with rollback to restore previous snapshot."
+        )
+    else:
+        # Table exists - verify current batch_id matches expected
+        try:
+            result = client.query(
+                f"SELECT batch_id FROM {db}.lakehouse_batch_log ORDER BY run_seq DESC LIMIT 1"
+            )
+            if result.result_rows:
+                current_batch_id = result.result_rows[0][0]
+                if current_batch_id != expected_batch_id:
+                    # Current batch_id doesn't match expected. This could mean:
+                    # 1. Deferred publication: expected_batch_id not published yet (safe to rollback)
+                    # 2. Concurrent publish: another run published after us (unsafe to rollback)
+                    # Check if expected_batch_id exists in the log at all to distinguish these cases.
+                    check_result = client.query(
+                        f"SELECT COUNT(*) FROM {db}.lakehouse_batch_log WHERE batch_id = %(batch_id)s",
+                        parameters={"batch_id": expected_batch_id},
+                    )
+                    expected_exists = check_result.result_rows[0][0] > 0
+
+                    if expected_exists:
+                        # expected_batch_id was published but is no longer current → concurrent publish
+                        logger.error(
+                            "Cannot rollback: current batch_id %s does not match expected %s. "
+                            "Another pipeline published after this run succeeded. Manual recovery needed.",
+                            current_batch_id,
+                            expected_batch_id,
+                        )
+                        return "partial_rollback_failed"
+                    # else: expected_batch_id not in log yet (deferred publication) → safe to rollback
+            # else: no batch_id in log yet (first run or table just created) → safe to rollback
+        except Exception as check_exc:
+            logger.error(
+                "Failed to verify batch_id before rollback: %s — aborting rollback to prevent data corruption.",
+                check_exc,
+            )
+            return "partial_rollback_failed"
+
+    # Check for in-progress publishes by looking for staging tables from other runs.
+    # If another run is mid-EXCHANGE (has created __staging_ tables but not yet published batch_id),
+    # we must not rollback as it would corrupt their in-progress publish.
+    # However, we need to distinguish active staging tables from stale ones left by cleanup failures.
+    try:
+        # Look for any __staging_ tables that aren't from our own rollback
+        # (our own ex-live tables are in the refreshed_tables list and will be handled separately)
+        result = client.query(
+            f"SELECT name FROM system.tables WHERE database = '{db}' AND name LIKE '%__staging_%'"
+        )
+        if result.result_rows:
+            # Filter out our own ex-live staging tables (which we're about to use for rollback)
+            our_staging_tables = {
+                f"{table}__staging_{expected_batch_id}" for table in refreshed_tables
+            }
+            other_staging_tables = [
+                row[0] for row in result.result_rows if row[0] not in our_staging_tables
+            ]
+
+            if other_staging_tables:
+                # Check if these are stale tables (from old runs) or active publishes.
+                # IMPORTANT: An in-progress publish has staging tables but NO batch_id yet.
+                # So if a staging table's run_id is NOT in batch_log, it could be active.
+                # We can only safely proceed if ALL staging tables are from old published batches
+                # OR are stale (created more than 1 hour ago, indicating a failed run).
+                try:
+                    # Get all batch_ids ever published (not just recent ones)
+                    # If batch_log doesn't exist yet, treat all staging tables as potentially active
+                    if batch_log_exists:
+                        all_batches = client.query(
+                            f"SELECT batch_id FROM {db}.lakehouse_batch_log"
+                        )
+                        all_batch_ids = (
+                            {row[0] for row in all_batches.result_rows}
+                            if all_batches.result_rows
+                            else set()
+                        )
+                    else:
+                        # No batch_log yet - this is first publish, so any staging tables are stale
+                        all_batch_ids = set()
+
+                    # Extract run_ids from staging table names and check their age
+                    unknown_staging = []
+                    for staging_name in other_staging_tables:
+                        # Extract run_id from staging table name
+                        if "__staging_" in staging_name:
+                            run_id = staging_name.split("__staging_")[-1]
+                            # If this run_id is NOT in batch_log, check if it's stale
+                            if run_id not in all_batch_ids:
+                                # Query table metadata to check age
+                                metadata = client.query(
+                                    f"SELECT metadata_modification_time FROM system.tables "
+                                    f"WHERE database = '{db}' AND name = '{staging_name}'"
+                                )
+                                if metadata.result_rows:
+                                    modified_time = metadata.result_rows[0][0]
+                                    # If table is older than 1 hour, treat as stale
+                                    import datetime
+
+                                    age_seconds = (
+                                        datetime.datetime.now() - modified_time
+                                    ).total_seconds()
+                                    if age_seconds < 3600:  # Less than 1 hour old
+                                        unknown_staging.append(staging_name)
+
+                    if unknown_staging:
+                        # Found recent staging tables with run_ids not in batch_log - could be active publishes
+                        logger.error(
+                            "Cannot rollback: found %d recent staging table(s) with unknown run_ids in %s: %s. "
+                            "These could be from in-progress publishes. Aborting rollback to prevent data corruption. "
+                            "Manual recovery needed.",
+                            len(unknown_staging),
+                            db,
+                            unknown_staging[:3],  # Log first 3 for debugging
+                        )
+                        return "partial_rollback_failed"
+                    else:
+                        # All staging tables are either from old published batches or stale (>1h old)
+                        logger.info(
+                            "Found %d staging table(s) in %s (all from old published batches or stale). "
+                            "Proceeding with rollback.",
+                            len(other_staging_tables),
+                            db,
+                        )
+                except Exception as batch_check_exc:
+                    # If we can't check batch_log, be conservative and abort
+                    logger.error(
+                        "Failed to check if staging tables are stale: %s — aborting rollback to prevent data corruption.",
+                        batch_check_exc,
+                    )
+                    return "partial_rollback_failed"
+    except Exception as check_exc:
+        logger.error(
+            "Failed to check for in-progress publishes: %s — aborting rollback to prevent data corruption.",
+            check_exc,
+        )
+        return "partial_rollback_failed"
+
+    rollback_failed = False
+    for live_table, (db, ex_live) in zip(
+        refreshed_tables, ex_live_tables[: len(refreshed_tables)]
+    ):
+        try:
+            client.command(f"EXCHANGE TABLES {db}.{live_table} AND {db}.{ex_live}")
+            logger.warning(
+                "Rolled back %s.%s to previous live data after PostgreSQL failure.",
+                db,
+                live_table,
+            )
+        except Exception as rb_exc:
+            rollback_failed = True
+            logger.error(
+                "Rollback of %s.%s failed: %s — manual recovery may be needed.",
+                db,
+                live_table,
+                rb_exc,
+            )
+
+    # Verify batch_id again after EXCHANGE to detect concurrent publishes.
+    # If another pipeline published between our check and EXCHANGE, we need to
+    # re-exchange to restore their data and abort our rollback.
+    # Skip this check if batch_log doesn't exist yet (deferred publication mode).
+    try:
+        if batch_log_exists:
+            result = client.query(
+                f"SELECT batch_id FROM {db}.lakehouse_batch_log ORDER BY run_seq DESC LIMIT 1"
+            )
+            if result.result_rows:
+                current_batch_id = result.result_rows[0][0]
+                if current_batch_id != expected_batch_id:
+                    logger.error(
+                        "Concurrent publish detected after EXCHANGE: batch_id changed from %s to %s. "
+                        "Re-exchanging tables to restore newer snapshot.",
+                        expected_batch_id,
+                        current_batch_id,
+                    )
+                    # Re-exchange to restore the newer pipeline's data
+                    for live_table, (db, ex_live) in zip(
+                        refreshed_tables, ex_live_tables[: len(refreshed_tables)]
+                    ):
+                        try:
+                            client.command(
+                                f"EXCHANGE TABLES {db}.{live_table} AND {db}.{ex_live}"
+                            )
+                        except Exception as revert_exc:
+                            logger.error(
+                                "Failed to revert %s.%s after concurrent publish: %s",
+                                db,
+                                live_table,
+                                revert_exc,
+                            )
+                    return "partial_rollback_failed"
+
+            # Also recheck for in-progress publishes after EXCHANGE.
+            # If another run started publishing after our initial check but before we exchanged,
+            # it may have completed EXCHANGE but not yet published batch_id. Check for its staging tables.
+            # Use the same stale-vs-active logic as the pre-rollback check.
+            result = client.query(
+                f"SELECT name FROM system.tables WHERE database = '{db}' AND name LIKE '%__staging_%'"
+            )
+            if result.result_rows:
+                our_staging_tables = {
+                    f"{table}__staging_{expected_batch_id}"
+                    for table in refreshed_tables
+                }
+                other_staging_tables = [
+                    row[0]
+                    for row in result.result_rows
+                    if row[0] not in our_staging_tables
+                ]
+
+                if other_staging_tables:
+                    # Check if these are from a concurrent publish (unknown run_id) or stale artifacts
+                    try:
+                        all_batches = client.query(
+                            f"SELECT batch_id FROM {db}.lakehouse_batch_log"
+                        )
+                        all_batch_ids = (
+                            {row[0] for row in all_batches.result_rows}
+                            if all_batches.result_rows
+                            else set()
+                        )
+
+                        unknown_staging = []
+                        for staging_name in other_staging_tables:
+                            if "__staging_" in staging_name:
+                                run_id = staging_name.split("__staging_")[-1]
+                                if run_id not in all_batch_ids:
+                                    # Apply the same age check as pre-rollback: if table is >1h old, treat as stale
+                                    metadata = client.query(
+                                        f"SELECT metadata_modification_time FROM system.tables "
+                                        f"WHERE database = '{db}' AND name = '{staging_name}'"
+                                    )
+                                    if metadata.result_rows:
+                                        modified_time = metadata.result_rows[0][0]
+                                    import datetime
+
+                                    age_seconds = (
+                                        datetime.datetime.now() - modified_time
+                                    ).total_seconds()
+                                    if (
+                                        age_seconds < 3600
+                                    ):  # Less than 1 hour old - could be concurrent
+                                        unknown_staging.append(staging_name)
+
+                    except Exception as stale_check_exc:
+                        logger.warning(
+                            "Failed to check if post-EXCHANGE staging tables are stale: %s. "
+                            "Assuming no concurrent publish.",
+                            stale_check_exc,
+                        )
+
+                    if unknown_staging:
+                        # Found staging tables with unknown run_ids - concurrent publish detected
+                        # Extract which tables the concurrent run touched by parsing staging table names
+                        concurrent_tables = set()
+                        for staging_name in unknown_staging:
+                            # Extract table name from staging table (format: <table>__staging_<run_id>)
+                            if "__staging_" in staging_name:
+                                table_name = staging_name.split("__staging_")[0]
+                                concurrent_tables.add(table_name)
+
+                        logger.error(
+                            "Concurrent publish detected after EXCHANGE: found %d staging table(s) with unknown run_ids: %s. "
+                            "This indicates another publish completed EXCHANGE during our rollback. "
+                            "Re-exchanging only the %d table(s) they touched: %s",
+                            len(unknown_staging),
+                            unknown_staging[:3],
+                            len(concurrent_tables),
+                            sorted(concurrent_tables),
+                        )
+                        # Re-exchange ONLY the tables the concurrent run touched
+                        # (not all tables in refreshed_tables, which could include untouched tables)
+                        for live_table, (db, ex_live) in zip(
+                            refreshed_tables, ex_live_tables[: len(refreshed_tables)]
+                        ):
+                            if live_table in concurrent_tables:
+                                try:
+                                    client.command(
+                                        f"EXCHANGE TABLES {db}.{live_table} AND {db}.{ex_live}"
+                                    )
+                                    logger.info(
+                                        "Re-exchanged %s.%s to restore concurrent publish's snapshot.",
+                                        db,
+                                        live_table,
+                                    )
+                                except Exception as revert_exc:
+                                    logger.error(
+                                        "Failed to revert %s.%s after detecting concurrent publish: %s",
+                                        db,
+                                        live_table,
+                                        revert_exc,
+                                    )
+                        return "partial_rollback_failed"
+                    else:
+                        # All staging tables are stale (from old published batches)
+                        logger.debug(
+                            "Found %d stale staging table(s) after EXCHANGE (all from old batches). "
+                            "No concurrent publish detected.",
+                            len(other_staging_tables),
+                        )
+    except Exception as check_exc:
+        logger.error(
+            "Failed to verify batch_id after EXCHANGE: %s — rollback may have corrupted data.",
+            check_exc,
+        )
+        rollback_failed = True
+
+    # Remove the batch marker that was published before PostgreSQL failed.
+    # Readers select the latest batch_id from lakehouse_batch_log, so leaving
+    # the marker would point them to a batch that no longer exists in live tables.
+    # Skip this if batch_log doesn't exist yet (deferred publication mode - nothing to delete).
+    if not rollback_failed and batch_log_exists:
+        try:
+            db = cfg["database"]
+            # Delete the specific batch_id entry (the one we just rolled back)
+            # Use batch_id instead of max(run_seq) to avoid deleting a concurrent run's marker
+            # Use SETTINGS mutations_sync=1 to make the deletion synchronous on MergeTree,
+            # ensuring readers don't see the rolled-back batch_id
+            client.command(
+                f"ALTER TABLE {db}.lakehouse_batch_log DELETE WHERE batch_id = '{expected_batch_id}' "
+                f"SETTINGS mutations_sync=1"
+            )
+            logger.info(
+                "Removed rolled-back batch marker from %s.lakehouse_batch_log.", db
+            )
+        except Exception as batch_exc:
+            rollback_failed = True
+            logger.error(
+                "Failed to remove batch marker during rollback: %s — manual recovery needed.",
+                batch_exc,
+            )
+
+    # Clean up ex-live tables only if rollback succeeded completely.
+    # If rollback failed, preserve ex-live tables for manual recovery.
+    if not rollback_failed:
+        for db, ex_live in ex_live_tables:
+            try:
+                client.command(f"DROP TABLE IF EXISTS {db}.{ex_live}")
+            except Exception:
+                pass
+    else:
+        logger.warning(
+            "Preserving %d ex-live tables for manual recovery after partial rollback failure.",
+            len(ex_live_tables),
+        )
+
+    rollback_status = "partial_rollback_failed" if rollback_failed else "rolled_back"
+    logger.info("ClickHouse rollback complete (status=%s).", rollback_status)
+    return rollback_status
 
 
 # ---------------------------------------------------------------------------
@@ -531,8 +1050,7 @@ def _is_private_network_host(host: str) -> bool:
                 return False  # unparseable address → treat as public
         # All resolved addresses must be in one of the allowed private CIDRs.
         return all(
-            any(addr in network for network in _PRIVATE_CIDRS)
-            for addr in addresses
+            any(addr in network for network in _PRIVATE_CIDRS) for addr in addresses
         )
     except OSError:
         return False
