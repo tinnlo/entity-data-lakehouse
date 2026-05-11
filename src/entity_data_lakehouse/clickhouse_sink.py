@@ -618,18 +618,18 @@ def rollback_clickhouse(
     cfg = _get_config()
     client = _get_client(cfg)
 
-    # Verify the current batch_id matches what we expect before rolling back.
-    # If another pipeline published after us, we must not roll back their data.
-    # Note: In dual-sink mode with deferred publication, expected_batch_id may not
-    # be in lakehouse_batch_log yet (publication happens after PostgreSQL commits).
-    # In that case, we check if the *previous* batch_id is still current, which
-    # means no concurrent run has published since our EXCHANGE.
+    # P1-J: Record the initial state to detect concurrent publishes in deferred mode.
+    # In deferred publication, expected_batch_id is not in lakehouse_batch_log yet.
+    # We need to record what batch_id (if any) is current NOW, then verify it hasn't
+    # changed to something newer. If it changes, that's a concurrent publish regardless
+    # of whether expected_batch_id was ever published.
     db = cfg["database"]
 
     # Check if lakehouse_batch_log exists first.
     # In dual-sink mode with deferred publication, the table may not exist yet
     # if this is the first publish and PostgreSQL failed before ClickHouse batch_id publication.
     batch_log_exists = False
+    initial_batch_id = None  # Record what's current before we start
     try:
         table_check = client.query(
             f"SELECT 1 FROM system.tables WHERE database = '{db}' AND name = 'lakehouse_batch_log'"
@@ -644,25 +644,25 @@ def rollback_clickhouse(
 
     if not batch_log_exists:
         # Table doesn't exist - deferred publication mode before first publish.
-        # This is the expected state when PostgreSQL fails before ClickHouse batch_id publication.
-        # Safe to proceed with rollback since no batch_id has been published yet.
+        # Record that there was no batch_id initially.
+        initial_batch_id = None
         logger.info(
             "lakehouse_batch_log does not exist yet (deferred publication). "
             "Proceeding with rollback to restore previous snapshot."
         )
     else:
-        # Table exists - verify current batch_id matches expected
+        # Table exists - record current batch_id
         try:
             result = client.query(
                 f"SELECT batch_id FROM {db}.lakehouse_batch_log ORDER BY run_seq DESC LIMIT 1"
             )
             if result.result_rows:
-                current_batch_id = result.result_rows[0][0]
-                if current_batch_id != expected_batch_id:
+                initial_batch_id = result.result_rows[0][0]
+                if initial_batch_id != expected_batch_id:
                     # Current batch_id doesn't match expected. This could mean:
-                    # 1. Deferred publication: expected_batch_id not published yet (safe to rollback)
-                    # 2. Concurrent publish: another run published after us (unsafe to rollback)
-                    # Check if expected_batch_id exists in the log at all to distinguish these cases.
+                    # 1. Deferred publication: expected_batch_id not published yet, initial_batch_id is previous batch
+                    # 2. Concurrent publish already happened: another run published after us
+                    # Check if expected_batch_id exists in the log to distinguish these cases.
                     check_result = client.query(
                         f"SELECT COUNT(*) FROM {db}.lakehouse_batch_log WHERE batch_id = %(batch_id)s",
                         parameters={"batch_id": expected_batch_id},
@@ -670,16 +670,58 @@ def rollback_clickhouse(
                     expected_exists = check_result.result_rows[0][0] > 0
 
                     if expected_exists:
-                        # expected_batch_id was published but is no longer current → concurrent publish
+                        # expected_batch_id was published but is no longer current → concurrent publish already happened
                         logger.error(
                             "Cannot rollback: current batch_id %s does not match expected %s. "
                             "Another pipeline published after this run succeeded. Manual recovery needed.",
-                            current_batch_id,
+                            initial_batch_id,
                             expected_batch_id,
                         )
                         return "partial_rollback_failed"
-                    # else: expected_batch_id not in log yet (deferred publication) → safe to rollback
-            # else: no batch_id in log yet (first run or table just created) → safe to rollback
+                    else:
+                        # expected_batch_id not in log yet (deferred publication).
+                        # Verify that initial_batch_id matches the batch_id in the ex-live tables.
+                        # The ex-live tables contain the data that was live before our EXCHANGE,
+                        # which should have batch_id = initial_batch_id if it's the previous batch.
+                        # If initial_batch_id doesn't match, it's a newer concurrent publish.
+                        if ex_live_tables:
+                            first_ex_live_table = ex_live_tables[0][1]  # (database, table_name)
+                            try:
+                                # Query the batch_id from the ex-live table data
+                                ex_live_batch_check = client.query(
+                                    f"SELECT DISTINCT batch_id FROM {db}.{first_ex_live_table} LIMIT 1"
+                                )
+                                if ex_live_batch_check.result_rows:
+                                    ex_live_batch_id = ex_live_batch_check.result_rows[0][0]
+                                    if ex_live_batch_id != initial_batch_id:
+                                        # The ex-live data has a different batch_id than what's currently published.
+                                        # This means initial_batch_id is from a concurrent publish that happened
+                                        # after our EXCHANGE but before this rollback check.
+                                        logger.error(
+                                            "Cannot rollback: current batch_id %s does not match the batch_id %s "
+                                            "in ex-live tables. Another pipeline published after this run's EXCHANGE. "
+                                            "Manual recovery needed.",
+                                            initial_batch_id,
+                                            ex_live_batch_id,
+                                        )
+                                        return "partial_rollback_failed"
+                            except Exception as ex_live_check_exc:
+                                # If we can't read the ex-live table, be conservative and abort
+                                logger.error(
+                                    "Failed to verify ex-live table batch_id: %s — aborting rollback to prevent data corruption.",
+                                    ex_live_check_exc,
+                                )
+                                return "partial_rollback_failed"
+
+                        logger.info(
+                            "Current batch_id %s does not match expected %s (deferred publication mode). "
+                            "Verified ex-live tables match current batch. Will verify no concurrent publish occurs during rollback.",
+                            initial_batch_id,
+                            expected_batch_id,
+                        )
+            else:
+                # No batch_id in log yet (table just created)
+                initial_batch_id = None
         except Exception as check_exc:
             logger.error(
                 "Failed to verify batch_id before rollback: %s — aborting rollback to prevent data corruption.",
@@ -785,6 +827,97 @@ def rollback_clickhouse(
         )
         return "partial_rollback_failed"
 
+    # P1-I: Final verification immediately before EXCHANGE.
+    # A concurrent publish could have completed between our initial checks and now.
+    # Re-check batch_id and staging tables one final time, then EXCHANGE immediately if safe.
+    # This minimizes (but cannot eliminate) the race window.
+    try:
+        # Re-check batch_log existence
+        table_check = client.query(
+            f"SELECT 1 FROM system.tables WHERE database = '{db}' AND name = 'lakehouse_batch_log'"
+        )
+        batch_log_exists_final = bool(table_check.result_rows)
+
+        if batch_log_exists_final:
+            # Verify batch_id hasn't changed
+            result = client.query(
+                f"SELECT batch_id FROM {db}.lakehouse_batch_log ORDER BY run_seq DESC LIMIT 1"
+            )
+            if result.result_rows:
+                current_batch_id = result.result_rows[0][0]
+                # P1-J: Compare against initial_batch_id, not expected_batch_id.
+                # In deferred mode, expected_batch_id was never published, but if
+                # initial_batch_id changes to something newer, that's a concurrent publish.
+                if current_batch_id != initial_batch_id:
+                    logger.error(
+                        "Concurrent publish detected before EXCHANGE: batch_id changed from %s to %s. "
+                        "Aborting rollback to prevent data corruption.",
+                        initial_batch_id,
+                        current_batch_id,
+                    )
+                    return "partial_rollback_failed"
+
+        # Re-check for new staging tables
+        result = client.query(
+            f"SELECT name FROM system.tables WHERE database = '{db}' AND name LIKE '%__staging_%'"
+        )
+        if result.result_rows:
+            our_staging_tables = {
+                f"{table}__staging_{expected_batch_id}" for table in refreshed_tables
+            }
+            other_staging_tables = [
+                row[0] for row in result.result_rows if row[0] not in our_staging_tables
+            ]
+
+            if other_staging_tables:
+                # Check if any are recent/unknown
+                all_batch_ids = set()
+                if batch_log_exists_final:
+                    all_batches = client.query(
+                        f"SELECT batch_id FROM {db}.lakehouse_batch_log"
+                    )
+                    all_batch_ids = (
+                        {row[0] for row in all_batches.result_rows}
+                        if all_batches.result_rows
+                        else set()
+                    )
+
+                unknown_staging = []
+                for staging_name in other_staging_tables:
+                    if "__staging_" in staging_name:
+                        run_id = staging_name.split("__staging_")[-1]
+                        if run_id not in all_batch_ids:
+                            metadata = client.query(
+                                f"SELECT metadata_modification_time FROM system.tables "
+                                f"WHERE database = '{db}' AND name = '{staging_name}'"
+                            )
+                            if metadata.result_rows:
+                                modified_time = metadata.result_rows[0][0]
+                                import datetime
+
+                                age_seconds = (
+                                    datetime.datetime.now() - modified_time
+                                ).total_seconds()
+                                if age_seconds < 3600:
+                                    unknown_staging.append(staging_name)
+
+                if unknown_staging:
+                    logger.error(
+                        "Concurrent publish detected before EXCHANGE: found %d recent staging table(s) with unknown run_ids: %s. "
+                        "Aborting rollback to prevent data corruption.",
+                        len(unknown_staging),
+                        unknown_staging[:3],
+                    )
+                    return "partial_rollback_failed"
+
+    except Exception as final_check_exc:
+        logger.error(
+            "Failed final verification before EXCHANGE: %s — aborting rollback to prevent data corruption.",
+            final_check_exc,
+        )
+        return "partial_rollback_failed"
+
+    # Perform the rollback EXCHANGE immediately after final verification
     rollback_failed = False
     for live_table, (db, ex_live) in zip(
         refreshed_tables, ex_live_tables[: len(refreshed_tables)]
@@ -805,153 +938,95 @@ def rollback_clickhouse(
                 rb_exc,
             )
 
-    # Verify batch_id again after EXCHANGE to detect concurrent publishes.
-    # If another pipeline published between our check and EXCHANGE, we need to
-    # re-exchange to restore their data and abort our rollback.
-    # Skip this check if batch_log doesn't exist yet (deferred publication mode).
+    # Post-EXCHANGE: Verify we didn't race with a concurrent publish.
+    # If batch_id or staging tables changed during our EXCHANGE, we may have corrupted data.
+    # This is a detection-only check - we cannot repair at this point.
     try:
-        if batch_log_exists:
+        table_check = client.query(
+            f"SELECT 1 FROM system.tables WHERE database = '{db}' AND name = 'lakehouse_batch_log'"
+        )
+        batch_log_exists_post = bool(table_check.result_rows)
+
+        if batch_log_exists_post:
             result = client.query(
                 f"SELECT batch_id FROM {db}.lakehouse_batch_log ORDER BY run_seq DESC LIMIT 1"
             )
             if result.result_rows:
                 current_batch_id = result.result_rows[0][0]
-                if current_batch_id != expected_batch_id:
+                # P1-J: Compare against initial_batch_id to detect concurrent publishes in deferred mode
+                if current_batch_id != initial_batch_id:
                     logger.error(
-                        "Concurrent publish detected after EXCHANGE: batch_id changed from %s to %s. "
-                        "Re-exchanging tables to restore newer snapshot.",
-                        expected_batch_id,
+                        "CRITICAL: Concurrent publish detected AFTER EXCHANGE completed. "
+                        "Batch_id changed from %s to %s during rollback. "
+                        "Data corruption likely - manual recovery required.",
+                        initial_batch_id,
                         current_batch_id,
                     )
-                    # Re-exchange to restore the newer pipeline's data
-                    for live_table, (db, ex_live) in zip(
-                        refreshed_tables, ex_live_tables[: len(refreshed_tables)]
-                    ):
-                        try:
-                            client.command(
-                                f"EXCHANGE TABLES {db}.{live_table} AND {db}.{ex_live}"
-                            )
-                        except Exception as revert_exc:
-                            logger.error(
-                                "Failed to revert %s.%s after concurrent publish: %s",
-                                db,
-                                live_table,
-                                revert_exc,
-                            )
+                    rollback_failed = True
                     return "partial_rollback_failed"
 
-            # Also recheck for in-progress publishes after EXCHANGE.
-            # If another run started publishing after our initial check but before we exchanged,
-            # it may have completed EXCHANGE but not yet published batch_id. Check for its staging tables.
-            # Use the same stale-vs-active logic as the pre-rollback check.
-            result = client.query(
-                f"SELECT name FROM system.tables WHERE database = '{db}' AND name LIKE '%__staging_%'"
-            )
-            if result.result_rows:
-                our_staging_tables = {
-                    f"{table}__staging_{expected_batch_id}"
-                    for table in refreshed_tables
-                }
-                other_staging_tables = [
-                    row[0]
-                    for row in result.result_rows
-                    if row[0] not in our_staging_tables
-                ]
+        # P1-K: Check for fresh staging tables that appeared during EXCHANGE.
+        # A concurrent dual-sink run may have finished EXCHANGE but not yet published its batch_id
+        # (deferred publication mode). The batch_id check above would miss this race.
+        # Scan for unknown staging tables to catch this case.
+        result = client.query(
+            f"SELECT name FROM system.tables WHERE database = '{db}' AND name LIKE '%__staging_%'"
+        )
+        if result.result_rows:
+            our_staging_tables = {
+                f"{table}__staging_{expected_batch_id}" for table in refreshed_tables
+            }
+            other_staging_tables = [
+                row[0] for row in result.result_rows if row[0] not in our_staging_tables
+            ]
 
-                if other_staging_tables:
-                    # Check if these are from a concurrent publish (unknown run_id) or stale artifacts
-                    try:
-                        all_batches = client.query(
-                            f"SELECT batch_id FROM {db}.lakehouse_batch_log"
-                        )
-                        all_batch_ids = (
-                            {row[0] for row in all_batches.result_rows}
-                            if all_batches.result_rows
-                            else set()
-                        )
+            if other_staging_tables:
+                # Check if any are recent/unknown (same logic as pre-EXCHANGE checks)
+                all_batch_ids = set()
+                if batch_log_exists_post:
+                    all_batches = client.query(
+                        f"SELECT batch_id FROM {db}.lakehouse_batch_log"
+                    )
+                    all_batch_ids = (
+                        {row[0] for row in all_batches.result_rows}
+                        if all_batches.result_rows
+                        else set()
+                    )
 
-                        unknown_staging = []
-                        for staging_name in other_staging_tables:
-                            if "__staging_" in staging_name:
-                                run_id = staging_name.split("__staging_")[-1]
-                                if run_id not in all_batch_ids:
-                                    # Apply the same age check as pre-rollback: if table is >1h old, treat as stale
-                                    metadata = client.query(
-                                        f"SELECT metadata_modification_time FROM system.tables "
-                                        f"WHERE database = '{db}' AND name = '{staging_name}'"
-                                    )
-                                    if metadata.result_rows:
-                                        modified_time = metadata.result_rows[0][0]
-                                    import datetime
+                unknown_staging = []
+                for staging_name in other_staging_tables:
+                    if "__staging_" in staging_name:
+                        run_id = staging_name.split("__staging_")[-1]
+                        if run_id not in all_batch_ids:
+                            metadata = client.query(
+                                f"SELECT metadata_modification_time FROM system.tables "
+                                f"WHERE database = '{db}' AND name = '{staging_name}'"
+                            )
+                            if metadata.result_rows:
+                                modified_time = metadata.result_rows[0][0]
+                                import datetime
 
-                                    age_seconds = (
-                                        datetime.datetime.now() - modified_time
-                                    ).total_seconds()
-                                    if (
-                                        age_seconds < 3600
-                                    ):  # Less than 1 hour old - could be concurrent
-                                        unknown_staging.append(staging_name)
+                                age_seconds = (
+                                    datetime.datetime.now() - modified_time
+                                ).total_seconds()
+                                if age_seconds < 3600:
+                                    unknown_staging.append(staging_name)
 
-                    except Exception as stale_check_exc:
-                        logger.warning(
-                            "Failed to check if post-EXCHANGE staging tables are stale: %s. "
-                            "Assuming no concurrent publish.",
-                            stale_check_exc,
-                        )
+                if unknown_staging:
+                    logger.error(
+                        "CRITICAL: Concurrent publish detected AFTER EXCHANGE completed. "
+                        "Found %d recent staging table(s) with unknown run_ids: %s. "
+                        "Data corruption likely - manual recovery required.",
+                        len(unknown_staging),
+                        unknown_staging[:3],
+                    )
+                    rollback_failed = True
+                    return "partial_rollback_failed"
 
-                    if unknown_staging:
-                        # Found staging tables with unknown run_ids - concurrent publish detected
-                        # Extract which tables the concurrent run touched by parsing staging table names
-                        concurrent_tables = set()
-                        for staging_name in unknown_staging:
-                            # Extract table name from staging table (format: <table>__staging_<run_id>)
-                            if "__staging_" in staging_name:
-                                table_name = staging_name.split("__staging_")[0]
-                                concurrent_tables.add(table_name)
-
-                        logger.error(
-                            "Concurrent publish detected after EXCHANGE: found %d staging table(s) with unknown run_ids: %s. "
-                            "This indicates another publish completed EXCHANGE during our rollback. "
-                            "Re-exchanging only the %d table(s) they touched: %s",
-                            len(unknown_staging),
-                            unknown_staging[:3],
-                            len(concurrent_tables),
-                            sorted(concurrent_tables),
-                        )
-                        # Re-exchange ONLY the tables the concurrent run touched
-                        # (not all tables in refreshed_tables, which could include untouched tables)
-                        for live_table, (db, ex_live) in zip(
-                            refreshed_tables, ex_live_tables[: len(refreshed_tables)]
-                        ):
-                            if live_table in concurrent_tables:
-                                try:
-                                    client.command(
-                                        f"EXCHANGE TABLES {db}.{live_table} AND {db}.{ex_live}"
-                                    )
-                                    logger.info(
-                                        "Re-exchanged %s.%s to restore concurrent publish's snapshot.",
-                                        db,
-                                        live_table,
-                                    )
-                                except Exception as revert_exc:
-                                    logger.error(
-                                        "Failed to revert %s.%s after detecting concurrent publish: %s",
-                                        db,
-                                        live_table,
-                                        revert_exc,
-                                    )
-                        return "partial_rollback_failed"
-                    else:
-                        # All staging tables are stale (from old published batches)
-                        logger.debug(
-                            "Found %d stale staging table(s) after EXCHANGE (all from old batches). "
-                            "No concurrent publish detected.",
-                            len(other_staging_tables),
-                        )
-    except Exception as check_exc:
+    except Exception as post_check_exc:
         logger.error(
             "Failed to verify batch_id after EXCHANGE: %s — rollback may have corrupted data.",
-            check_exc,
+            post_check_exc,
         )
         rollback_failed = True
 
